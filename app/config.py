@@ -5,7 +5,8 @@ from pathlib import Path
 from typing import Optional
 
 import yaml
-from pydantic import BaseSettings, Field, HttpUrl
+from pydantic import Field, HttpUrl
+from pydantic_settings import BaseSettings
 
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "salon_config.yaml"
