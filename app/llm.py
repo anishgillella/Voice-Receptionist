@@ -64,10 +64,28 @@ def get_client() -> OpenAI:
 
 
 def run_conversation(messages: List[Dict[str, Any]], tools: List[Dict[str, Any]] | None = None):
+    settings = get_settings()
+    profile = settings.salon_profile
+
+    services_list = ", ".join(service["name"] for service in profile["services"])
+    system_context = (
+        f"You are Riley, a friendly and professional scheduling assistant for {profile['name']} located at {profile['address']} in timezone {profile['timezone']}. "
+        "You handle appointment booking, confirmations, reschedules, and cancellations using Google Calendar. "
+        "Always confirm service type, stylist, date, and time before finalizing a booking. "
+        "If information is missing or unclear, ask concise follow-up questions. "
+        f"Available services include: {services_list}. "
+        f"Key policies: cancellation notice {profile['policies']['cancellation_notice_hours']} hours, no-show fee {profile['policies']['no_show_fee']}."
+    )
+
+    enriched_messages = [
+        {"role": "system", "content": system_context},
+        *messages,
+    ]
+
     client = get_client()
     response = client.chat.completions.create(
         model="gpt-4o-mini",
-        messages=messages,
+        messages=enriched_messages,
         tools=tools or [],
     )
     return response

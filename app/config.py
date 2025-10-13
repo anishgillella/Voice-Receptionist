@@ -1,9 +1,14 @@
 """Configuration utilities for the voice scheduling MVP."""
 
 from functools import lru_cache
+from pathlib import Path
 from typing import Optional
 
+import yaml
 from pydantic import BaseSettings, Field, HttpUrl
+
+
+CONFIG_PATH = Path(__file__).resolve().parent.parent / "salon_config.yaml"
 
 
 class Settings(BaseSettings):
@@ -17,14 +22,22 @@ class Settings(BaseSettings):
     google_refresh_token: str = Field(..., env="GOOGLE_REFRESH_TOKEN")
     google_calendar_id: str = Field("primary", env="GOOGLE_CALENDAR_ID")
 
+    supabase_database_url: str = Field(..., env="SUPABASE_DATABASE_URL")
+
     default_timezone: str = Field("America/New_York", env="DEFAULT_TIMEZONE")
     backend_base_url: HttpUrl = Field(..., env="BACKEND_BASE_URL")
 
     vapi_agent_id: Optional[str] = Field(None, env="VAPI_AGENT_ID")
+    transcript_debug: bool = Field(False, env="TRANSCRIPT_DEBUG")
 
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
+
+    @property
+    def salon_profile(self) -> dict:
+        with CONFIG_PATH.open("r", encoding="utf-8") as fh:
+            return yaml.safe_load(fh)
 
 
 @lru_cache()
