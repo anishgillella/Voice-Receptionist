@@ -30,6 +30,7 @@ class Settings(BaseSettings):
 
     vapi_agent_id: Optional[str] = Field(None, env="VAPI_AGENT_ID")
     transcript_debug: bool = Field(False, env="TRANSCRIPT_DEBUG")
+    vapi_phone_number_id: Optional[str] = Field(None, env="VAPI_PHONE_NUMBER_ID")
 
     class Config:
         env_file = ".env"

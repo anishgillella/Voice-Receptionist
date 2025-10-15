@@ -186,8 +186,12 @@ async def handle_tool_call(
 
 class OutboundCallRequest(BaseModel):
     to_number: str
-    phone_number_id: str
+    phone_number_id: str | None = None
     agent_id: str | None = None
+
+
+class UpdateAssistantRequest(BaseModel):
+    refresh_prompts: bool = True
 
 
 @app.post("/outbound-call", tags=["vapi"])
@@ -200,6 +204,34 @@ def outbound_call(request: OutboundCallRequest) -> dict[str, Any]:
         agent_id=request.agent_id,
     )
     return result
+
+
+@app.post("/assistant/update-prompts", tags=["vapi"])
+def update_prompts(_: UpdateAssistantRequest) -> dict[str, Any]:
+    """Push the latest salon prompt and messages to the Vapi assistant."""
+
+    result = vapi_client.update_assistant_prompts()
+    return result
+
+
+@app.get("/call/latest", tags=["vapi"])
+def get_latest_call() -> dict[str, Any]:
+    """Retrieve the latest call metadata from Vapi."""
+
+    call = vapi_client.fetch_latest_call()
+    if not call:
+        raise HTTPException(status_code=404, detail="No calls found")
+    return call
+
+
+@app.get("/call/{call_id}", tags=["vapi"])
+def get_call(call_id: str) -> dict[str, Any]:
+    """Fetch a call transcript and details by ID."""
+
+    call = vapi_client.fetch_call_by_id(call_id)
+    if not call:
+        raise HTTPException(status_code=404, detail="Call not found")
+    return call
 
 
 @app.get("/transcript/{session_id}", tags=["transcripts"])

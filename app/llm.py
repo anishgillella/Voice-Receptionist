@@ -5,6 +5,7 @@ from typing import Any, Dict, List
 from openai import OpenAI
 
 from .config import get_settings
+from .models import build_system_prompt
 
 
 APPOINTMENT_TOOLS: List[Dict[str, Any]] = [
@@ -67,15 +68,7 @@ def run_conversation(messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]
     settings = get_settings()
     profile = settings.salon_profile
 
-    services_list = ", ".join(service["name"] for service in profile["services"])
-    system_context = (
-        f"You are Riley, a friendly and professional scheduling assistant for {profile['name']} located at {profile['address']} in timezone {profile['timezone']}. "
-        "You handle appointment booking, confirmations, reschedules, and cancellations using Google Calendar. "
-        "Always confirm service type, stylist, date, and time before finalizing a booking. "
-        "If information is missing or unclear, ask concise follow-up questions. "
-        f"Available services include: {services_list}. "
-        f"Key policies: cancellation notice {profile['policies']['cancellation_notice_hours']} hours, no-show fee {profile['policies']['no_show_fee']}."
-    )
+    system_context = build_system_prompt(profile)
 
     enriched_messages = [
         {"role": "system", "content": system_context},
