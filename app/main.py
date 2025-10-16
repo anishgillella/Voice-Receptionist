@@ -1,15 +1,20 @@
 """FastAPI entry point for the voice scheduling MVP."""
 
 import json
-from typing import Any
+import logging
+from typing import Any, Optional, Tuple
+
+from uuid import uuid5, NAMESPACE_URL
 
 from fastapi import FastAPI, HTTPException
+from fastapi.concurrency import run_in_threadpool
 
 from pydantic import BaseModel
 
 from .calendar import create_event, delete_event, list_upcoming_events
 from .config import get_settings
 from .db import (
+    end_session,
     ensure_tables_exist,
     fetch_transcript,
     insert_calendar_action,
@@ -20,6 +25,9 @@ from .llm import APPOINTMENT_TOOLS, run_conversation
 from .sessions import session_store
 from .vapi_client import vapi_client
 from .vapi_models import VapiWebhookPayload, VapiWebhookResponse
+
+
+logger = logging.getLogger(__name__)
 
 
 app = FastAPI(title="Voice Scheduler MVP")
@@ -39,41 +47,48 @@ def health_check() -> dict[str, str]:
 @app.on_event("startup")
 async def on_startup() -> None:
     await ensure_tables_exist()
+    await _update_vapi_assistant()
 
 
 @app.post("/vapi-webhook", response_model=VapiWebhookResponse, tags=["vapi"])
 async def vapi_webhook(payload: VapiWebhookPayload) -> VapiWebhookResponse:
     """Handle Vapi webhook events by delegating to OpenAI."""
 
-    if payload.transcript and payload.transcript.transcript_type != "final":
+    session_id = _resolve_session_id(payload.session_id, payload.call_id)
+
+    # Handle transcript-only events
+    if payload.transcript:
+        if payload.transcript.transcript_type != "final":
+            return VapiWebhookResponse(response="")
+
+        if session_id:
+            await _ensure_session_metadata(session_id, payload)
+            await insert_transcript(
+                session_id,
+                payload.transcript.role,
+                payload.transcript.transcript,
+                payload.transcript.metadata or {},
+            )
         return VapiWebhookResponse(response="")
 
-    if not payload.text:
-        payload_text = payload.transcript.transcript if payload.transcript else ""
-    else:
-        payload_text = payload.text
+    if not session_id:
+        return VapiWebhookResponse(response="")
 
+    payload_text = payload.text or ""
     if not payload_text:
-        raise HTTPException(status_code=400, detail="Empty transcript received.")
+        return VapiWebhookResponse(response="")
 
-    session_history = session_store.get(payload.session_id)
-    await upsert_session(
-        payload.session_id,
-        {
-            "call_id": payload.call_id,
-            "caller": payload.caller.dict() if payload.caller else None,
-            "metadata": payload.metadata,
-        },
-    )
+    await _ensure_session_metadata(session_id, payload)
 
+    session_history = session_store.get(session_id)
     messages = [
         *session_history,
         {"role": "user", "content": payload_text},
     ]
 
-    session_store.append(payload.session_id, "user", payload_text)
+    session_store.append(session_id, "user", payload_text)
     await insert_transcript(
-        payload.session_id,
+        session_id,
         "user",
         payload_text,
         {
@@ -92,26 +107,60 @@ async def vapi_webhook(payload: VapiWebhookPayload) -> VapiWebhookResponse:
         name = tool["function"]["name"]
         arguments = json.loads(tool["function"]["arguments"])
         reply_text, calendar_metadata = await handle_tool_call(
-            payload.session_id, name, arguments
+            session_id, name, arguments
         )
     else:
         reply_text = assistant_message.get("content", "I'm here to help.")
         calendar_metadata = None
 
     session_store.append(
-        payload.session_id,
+        session_id,
         "assistant",
         reply_text,
         metadata=calendar_metadata,
     )
     await insert_transcript(
-        payload.session_id,
+        session_id,
         "assistant",
         reply_text,
         {"tool": calendar_metadata} if calendar_metadata else {},
     )
 
     return VapiWebhookResponse(response=reply_text)
+
+
+@app.post("/vapi-call-ended", tags=["vapi"])
+async def vapi_call_ended(payload: dict[str, Any]) -> dict[str, str]:
+    session_id = _resolve_session_id(payload.get("session_id"), payload.get("call_id"))
+    metadata = payload.get("metadata", {})
+    if not session_id:
+        raise HTTPException(status_code=400, detail="Missing session_id")
+
+    await end_session(session_id, metadata)
+
+    return {"status": "ended"}
+
+
+async def _ensure_session_metadata(session_id: str, payload: VapiWebhookPayload) -> None:
+    await upsert_session(
+        session_id,
+        {
+            "call_id": payload.call_id,
+            "caller": payload.caller.dict() if payload.caller else None,
+            "metadata": payload.metadata,
+        },
+    )
+
+
+def _resolve_session_id(session_id: Optional[str], call_id: Optional[str]) -> Optional[str]:
+    if session_id:
+        return session_id
+    if call_id:
+        try:
+            return str(uuid5(NAMESPACE_URL, call_id))
+        except ValueError:
+            return None
+    return None
 
 
 async def handle_tool_call(
@@ -184,6 +233,18 @@ async def handle_tool_call(
     return "I couldn't complete that request.", None
 
 
+async def _update_vapi_assistant() -> None:
+    settings = get_settings()
+
+    if not settings.vapi_agent_id:
+        return
+
+    try:
+        await run_in_threadpool(vapi_client.update_assistant_prompts)
+    except Exception as exc:  # pragma: no cover - best effort logging
+        logger.warning("Failed to update Vapi assistant prompts: %s", exc)
+
+
 class OutboundCallRequest(BaseModel):
     to_number: str
     phone_number_id: str | None = None
@@ -192,6 +253,7 @@ class OutboundCallRequest(BaseModel):
 
 class UpdateAssistantRequest(BaseModel):
     refresh_prompts: bool = True
+    base_url: str | None = None
 
 
 @app.post("/outbound-call", tags=["vapi"])
@@ -207,10 +269,10 @@ def outbound_call(request: OutboundCallRequest) -> dict[str, Any]:
 
 
 @app.post("/assistant/update-prompts", tags=["vapi"])
-def update_prompts(_: UpdateAssistantRequest) -> dict[str, Any]:
+def update_prompts(request: UpdateAssistantRequest) -> dict[str, Any]:
     """Push the latest salon prompt and messages to the Vapi assistant."""
 
-    result = vapi_client.update_assistant_prompts()
+    result = vapi_client.update_assistant_prompts(base_url=request.base_url)
     return result
 
 

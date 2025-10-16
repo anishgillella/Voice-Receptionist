@@ -77,6 +77,24 @@ async def upsert_session(session_id: str, metadata: Dict[str, Any]) -> None:
         await conn.close()
 
 
+async def end_session(session_id: str, metadata: Dict[str, Any]) -> None:
+    conn = await get_connection()
+    try:
+        await conn.execute(
+            """
+            update sessions
+            set status = 'ended',
+                ended_at = coalesce(ended_at, now()),
+                metadata = coalesce(metadata, '{}'::jsonb) || $2
+            where id = $1
+            """,
+            session_id,
+            metadata,
+        )
+    finally:
+        await conn.close()
+
+
 async def insert_transcript(session_id: str, role: str, message: str, metadata: Dict[str, Any]) -> None:
     conn = await get_connection()
     try:

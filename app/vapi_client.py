@@ -23,27 +23,35 @@ class VapiClient:
         self._phone_number_id = settings.vapi_phone_number_id
         self._profile = settings.salon_profile
 
-    def update_assistant_prompts(self) -> Dict[str, Any]:
+    def update_assistant_prompts(self, *, base_url: Optional[str] = None) -> Dict[str, Any]:
         if not self._agent_id:
             raise ValueError("VAPI_AGENT_ID must be provided to update assistant prompts.")
 
         system_prompt = build_system_prompt(self._profile)
         first_message = build_first_message(self._profile)
-        voicemail = build_voicemail_message(self._profile)
-        end_call = build_end_call_message(self._profile)
+        base_webhook_url = base_url or get_settings().backend_base_url.rstrip("/")
 
         payload = {
             "firstMessage": first_message,
-            "voicemailMessage": voicemail,
-            "endCallMessage": end_call,
             "model": {
+                "provider": "openai",
+                "model": "gpt-4o-mini",
                 "messages": [
                     {
                         "role": "system",
                         "content": system_prompt,
                     }
-                ]
+                ],
             },
+            "voicemailMessage": build_voicemail_message(self._profile),
+            "endCallMessage": build_end_call_message(self._profile),
+            "serverUrl": f"{base_webhook_url}/vapi-webhook",
+            "serverMessages": [
+                "transcript",
+                "conversation-update",
+                "end-of-call-report",
+                "status-update",
+            ],
         }
 
         response = self._client.patch(f"/assistant/{self._agent_id}", json=payload)
