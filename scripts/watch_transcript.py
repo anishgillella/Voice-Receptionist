@@ -12,6 +12,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from cli_utils import print_section, print_subsection
+
 
 def get_latest_transcript() -> Optional[Path]:
     """Get the most recently modified transcript file."""
@@ -33,9 +35,7 @@ def display_transcript(file_path: Path) -> None:
     try:
         data = json.loads(file_path.read_text())
         
-        print("\n" + "="*70)
-        print("📝 TRANSCRIPT")
-        print("="*70)
+        print_section("📝 TRANSCRIPT", 70)
         
         # Display key info
         print(f"\n📞 Call ID: {data.get('call_id', 'Unknown')}")
@@ -45,17 +45,13 @@ def display_transcript(file_path: Path) -> None:
         # Display transcript
         transcript_text = data.get('transcript', '')
         if transcript_text:
-            print(f"\n{'─'*70}")
-            print("CONVERSATION:")
-            print(f"{'─'*70}")
+            print_subsection("CONVERSATION:", 70)
             print(transcript_text)
         
         # Display recording info
         recording = data.get('recording', {})
         if recording:
-            print(f"\n{'─'*70}")
-            print("🎙️ RECORDING:")
-            print(f"{'─'*70}")
+            print_subsection("🎙️ RECORDING:", 70)
             print(f"Duration: {recording.get('duration', 'N/A')}s")
             if recording.get('url'):
                 print(f"URL: {recording.get('url')}")

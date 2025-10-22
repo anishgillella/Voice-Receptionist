@@ -12,13 +12,9 @@ Usage:
 import asyncio
 import json
 import sys
-from pathlib import Path
 from typing import Any, Dict, List
 
-# Add parent directory to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from app.config import get_settings
+from cli_utils import setup_environment, print_section, print_subsection
 from app.vapi_client import initiate_outbound_call
 
 
@@ -125,9 +121,7 @@ async def call_all_prospects(prospects: List[Dict[str, Any]] | None = None) -> N
     if prospects is None:
         prospects = SAMPLE_PROSPECTS
     
-    print(f"\n{'='*70}")
-    print(f"🎯 Insurance Prospect Outbound Calling Campaign")
-    print(f"{'='*70}")
+    print_section("🎯 Insurance Prospect Outbound Calling Campaign", 70)
     print(f"Initiating calls to {len(prospects)} prospects...\n")
     
     results = []
@@ -146,9 +140,7 @@ async def call_all_prospects(prospects: List[Dict[str, Any]] | None = None) -> N
             await asyncio.sleep(2)
     
     # Print summary
-    print(f"\n{'='*70}")
-    print("📊 Campaign Summary")
-    print(f"{'='*70}")
+    print_section("📊 Campaign Summary", 70)
     
     successful = sum(1 for r in results if r["status"] == "success")
     failed = sum(1 for r in results if r["status"] == "failed")
@@ -159,6 +151,7 @@ async def call_all_prospects(prospects: List[Dict[str, Any]] | None = None) -> N
     print(f"Success rate: {(successful/len(results)*100):.1f}%")
     
     # Save detailed results
+    from pathlib import Path
     results_file = Path("data/prospect_calls_log.json")
     results_file.parent.mkdir(parents=True, exist_ok=True)
     results_file.write_text(json.dumps(results, indent=2))
@@ -175,9 +168,7 @@ def list_prospects(prospects: List[Dict[str, Any]] | None = None) -> None:
     if prospects is None:
         prospects = SAMPLE_PROSPECTS
     
-    print(f"\n{'='*70}")
-    print(f"📋 Insurance Prospects")
-    print(f"{'='*70}\n")
+    print_section("📋 Insurance Prospects", 70)
     
     for i, prospect in enumerate(prospects, 1):
         print(f"{i}. {prospect['prospect_name']}")
@@ -193,12 +184,7 @@ async def main() -> None:
     """Main entry point."""
     
     # Validate environment
-    settings = get_settings()
-    
-    if not settings.vapi_agent_id:
-        print("❌ Error: VAPI_AGENT_ID not set in environment")
-        print("Please run: python scripts/start_call.py create-agent")
-        sys.exit(1)
+    setup_environment()
     
     # Parse arguments
     if len(sys.argv) > 1:

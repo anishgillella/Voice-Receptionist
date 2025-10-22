@@ -20,24 +20,19 @@ Examples:
 """
 
 import asyncio
-import json
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from app.config import get_settings
+from cli_utils import setup_environment, print_section
 from app.vapi_client import create_or_update_insurance_agent
 
 
 async def setup_agent(agent_id: str | None = None, call_type: str = "outbound") -> None:
     """Setup or update an insurance agent."""
     
-    settings = get_settings()
+    settings = setup_environment()
     
-    print("\n" + "="*70)
-    print("🔧 Insurance Agent Setup")
-    print("="*70)
+    print_section("🔧 Insurance Agent Setup", 70)
     
     if agent_id:
         print(f"\nUpdating existing {call_type.upper()} agent: {agent_id}")
@@ -80,9 +75,7 @@ async def setup_agent(agent_id: str | None = None, call_type: str = "outbound") 
         env_file.write_text(env_content)
         print(f"\n✅ Updated .env file with new {call_type.upper()} agent ID")
     
-    print("\n" + "="*70)
-    print("✅ Setup Complete!")
-    print("="*70)
+    print_section("✅ Setup Complete!", 70)
     print(f"\nAgent ID: {new_agent_id}")
     print(f"Agent Name: {response.get('name')}")
     print(f"Call Type: {call_type.upper()}")

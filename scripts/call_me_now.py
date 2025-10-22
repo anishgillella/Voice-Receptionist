@@ -3,27 +3,24 @@
 Direct call script to call the user immediately with the insurance agent.
 
 Usage:
-    python scripts/call_me_now.py
+    python scripts/call_me_now.py [outbound|inbound]
 """
 
 import asyncio
 import json
-import sys
-from pathlib import Path
 import os
+import sys
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from app.config import get_settings
+from cli_utils import setup_environment, print_section
 from app.vapi_client import initiate_outbound_call
 
 
 async def main() -> None:
     """Make a direct call to the user."""
     
-    settings = get_settings()
+    settings = setup_environment()
     
-    # Your phone number in E.164 format (set via environment or command line)
+    # Your phone number in E.164 format (set via environment)
     your_phone_number = os.getenv("TEST_PHONE_NUMBER")
     if not your_phone_number:
         print("❌ Error: TEST_PHONE_NUMBER environment variable not set")
@@ -36,9 +33,7 @@ async def main() -> None:
         if sys.argv[1] in ["inbound", "outbound"]:
             call_type = sys.argv[1]
     
-    print("\n" + "="*70)
-    print("📞 Insurance Agent - Direct Call")
-    print("="*70)
+    print_section("📞 Insurance Agent - Direct Call", 70)
     print(f"Calling: {your_phone_number}")
     print(f"Call Type: {call_type.upper()}")
     if call_type == "inbound":
