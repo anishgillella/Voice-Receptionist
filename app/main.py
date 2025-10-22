@@ -34,6 +34,18 @@ class CallRequest(BaseModel):
     )
 
 
+class InsuranceProspectCallRequest(BaseModel):
+    """Payload for making an outbound call to an insurance prospect."""
+    
+    phone_number: str = Field(..., description="E.164 formatted phone number, e.g. +15551234567")
+    prospect_name: str = Field(..., description="Prospect's full name")
+    company_name: str = Field(..., description="Company/business name")
+    industry: Optional[str] = Field(default=None, description="Industry/business type")
+    lead_id: Optional[str] = Field(default=None, description="Internal lead ID")
+    estimated_employees: Optional[int] = Field(default=None, description="Estimated number of employees")
+    location: Optional[str] = Field(default=None, description="Business location/state")
+
+
 @app.get("/health")
 async def healthcheck() -> Dict[str, str]:
     """Basic readiness probe."""
@@ -63,6 +75,59 @@ async def trigger_call(
 
     logger.info("Queued call via Vapi", extra={"response": response})
 
+    return JSONResponse(content=response, status_code=status.HTTP_202_ACCEPTED)
+
+
+@app.post("/call/insurance-prospect")
+async def trigger_insurance_prospect_call(
+    payload: InsuranceProspectCallRequest,
+    settings: Settings = Depends(get_settings),
+) -> JSONResponse:
+    """Trigger an outbound call to an insurance prospect.
+    
+    This endpoint initiates a call with insurance prospect information that the
+    agent will use to personalize the conversation.
+    """
+    
+    # Build prospect metadata
+    prospect_info = {
+        "prospect_name": payload.prospect_name,
+        "company_name": payload.company_name,
+        "call_type": "insurance_prospect",
+    }
+    
+    if payload.industry:
+        prospect_info["industry"] = payload.industry
+    if payload.lead_id:
+        prospect_info["lead_id"] = payload.lead_id
+    if payload.estimated_employees:
+        prospect_info["estimated_employees"] = payload.estimated_employees
+    if payload.location:
+        prospect_info["location"] = payload.location
+    
+    # Trigger call via the Vapi API
+    try:
+        response = await initiate_outbound_call(
+            payload.phone_number,
+            prospect_info=prospect_info,
+        )
+    except Exception as exc:  # pragma: no cover - propagated to caller
+        logger.exception("Failed to initiate insurance prospect call")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
+    
+    logger.info(
+        "Queued insurance prospect call",
+        extra={
+            "prospect": payload.prospect_name,
+            "company": payload.company_name,
+            "phone": payload.phone_number,
+            "response": response,
+        },
+    )
+    
     return JSONResponse(content=response, status_code=status.HTTP_202_ACCEPTED)
 
 
@@ -126,7 +191,7 @@ async def webhook(request: Request) -> Dict[str, str]:
     elif message_type == "status-update":
         asyncio.create_task(_handle_status_update(message))
     else:
-        logger.info("Ignored webhook message type", extra={"type": message_type})
+        logger.info("Ignored webhook message type", extra={"type": message_type, "call_id": message.get("call", {}).get("id")})
 
     return {"status": "received"}
 
