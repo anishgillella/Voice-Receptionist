@@ -30,6 +30,11 @@ email_agent/.env
 email_agent/gmail_tokens.json
 email_agent/*.json
 
+# Form filler secrets
+form_filler/local_forms/.env
+form_filler/browser_forms/.env
+form_filler/**/.env
+
 # IDE
 .vscode/
 .idea/
