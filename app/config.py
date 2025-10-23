@@ -83,6 +83,33 @@ class Settings(BaseSettings):
     vapi_phone_number_id_outbound: Optional[str] = Field(None, alias="VAPI_PHONE_NUMBER_ID_OUTBOUND")
     vapi_phone_number_id_inbound: Optional[str] = Field(None, alias="VAPI_PHONE_NUMBER_ID_INBOUND")
 
+    # Supabase Configuration
+    supabase_url: str = Field(..., alias="SUPABASE_URL")
+    supabase_key: str = Field(..., alias="SUPABASE_KEY")
+    supabase_schema: str = Field(default="public", alias="SUPABASE_SCHEMA")
+
+    # Embeddings Configuration
+    hf_token: Optional[str] = Field(None, alias="HF_TOKEN")
+    embedding_model: str = Field(default="BAAI/bge-large-en-v1.5", alias="EMBEDDING_MODEL")
+
+    # OpenRouter Configuration (for summarization)
+    openrouter_api_key: Optional[str] = Field(None, alias="OPENROUTER_API_KEY")
+    summarization_model: str = Field(default="openai/gpt-5-nano", alias="SUMMARIZATION_MODEL")
+
+    # Customer Configuration
+    customer_phone_number: str = Field(default="4698674545", alias="CUSTOMER_PHONE_NUMBER")
+    customer_first_name: Optional[str] = Field(None, alias="CUSTOMER_FIRST_NAME")
+    customer_last_name: Optional[str] = Field(None, alias="CUSTOMER_LAST_NAME")
+    customer_email: Optional[str] = Field(None, alias="CUSTOMER_EMAIL")
+    customer_company_name: Optional[str] = Field(None, alias="CUSTOMER_COMPANY_NAME")
+    customer_industry: Optional[str] = Field(None, alias="CUSTOMER_INDUSTRY")
+    customer_location: Optional[str] = Field(None, alias="CUSTOMER_LOCATION")
+
+    # Environment
+    environment: str = Field(default="development", alias="ENVIRONMENT")
+    debug: bool = Field(default=True, alias="DEBUG")
+    log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

@@ -15,13 +15,28 @@ from pydantic import BaseModel, Field
 
 from .config import Settings, get_settings
 from .vapi_client import initiate_outbound_call
-
+from .db import (
+    close_db,
+    get_or_create_customer,
+    store_conversation,
+    store_embedding,
+    store_customer_memory,
+    get_db,
+    update_conversation_summary,
+    get_table_name,
+)
+from .embeddings import generate_embedding
+import httpx
+from .summarization import summarize_transcript
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-
 app = FastAPI(title="Voice Agent", version="0.1.0")
+
+# Track calls that need transcript processing
+_pending_calls: Dict[str, Dict[str, Any]] = {}
+_vapi_base_url = "https://api.vapi.ai"
 
 
 class CallRequest(BaseModel):
@@ -47,10 +62,120 @@ class InsuranceProspectCallRequest(BaseModel):
 
 
 @app.get("/health")
-async def healthcheck() -> Dict[str, str]:
-    """Basic readiness probe."""
-
+async def health() -> Dict[str, str]:
+    """Health check endpoint."""
     return {"status": "ok"}
+
+
+@app.post("/process-calls")
+async def process_pending_calls() -> Dict[str, Any]:
+    """Process all pending calls and generate transcripts/embeddings."""
+    settings = get_settings()
+    processed = []
+    failed = []
+    
+    logger.info(f"Processing {len(_pending_calls)} pending calls")
+    
+    calls_to_process = list(_pending_calls.items())
+    for call_id, call_info in calls_to_process:
+        try:
+            await _process_call_transcript(call_id, call_info["customer_phone"], settings)
+            processed.append(call_id)
+        except Exception as e:
+            logger.error(f"Failed to process {call_id}: {e}")
+            failed.append({"call_id": call_id, "error": str(e)})
+    
+    return {
+        "status": "completed",
+        "processed": len(processed),
+        "failed": len(failed),
+        "processed_calls": processed,
+        "failed_calls": failed
+    }
+
+
+@app.post("/process-call/{call_id}")
+async def process_specific_call(call_id: str) -> Dict[str, Any]:
+    """Process a specific call by call_id."""
+    settings = get_settings()
+    customer_phone = "+14698674545"  # Default customer
+    
+    print(f"Processing specific call: {call_id}")
+    logger.info(f"Processing specific call: {call_id}")
+    
+    try:
+        await _process_call_transcript(call_id, customer_phone, settings)
+        return {
+            "status": "success",
+            "call_id": call_id,
+            "message": "Call processed successfully"
+        }
+    except Exception as e:
+        logger.error(f"Failed to process call {call_id}: {e}")
+        return {
+            "status": "failed",
+            "call_id": call_id,
+            "error": str(e)
+        }
+
+
+@app.post("/fetch-recent-transcripts")
+async def fetch_recent_transcripts() -> Dict[str, Any]:
+    """Fetch transcripts from VAPI for recent calls and process them."""
+    settings = get_settings()
+    processed = []
+    failed = []
+    
+    logger.info("Fetching recent calls from VAPI")
+    
+    try:
+        # Get recent calls from VAPI
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            headers = {"Authorization": f"Bearer {settings.vapi_api_key}"}
+            response = await client.get(f"{_vapi_base_url}/call?limit=10", headers=headers)
+            response.raise_for_status()
+        
+        calls = response.json() if isinstance(response.json(), list) else response.json().get("calls", [])
+        logger.info(f"Found {len(calls)} recent calls from VAPI")
+        
+        # Get customer phone for context
+        db = get_db()
+        customer = db.execute(
+            f"SELECT phone_number FROM brokerage.customers LIMIT 1",
+            ()
+        )
+        customer_phone = customer[0]['phone_number'] if customer else settings.customer_phone_number
+        
+        for call in calls[:5]:  # Process last 5 calls
+            if isinstance(call, dict):
+                call_id = call.get("id")
+                
+                # Skip if already processed
+                existing = db.execute(
+                    f"SELECT id FROM brokerage.conversations WHERE call_id = %s",
+                    (call_id,)
+                )
+                
+                if not existing:
+                    try:
+                        logger.info(f"Processing call from VAPI: {call_id}")
+                        await _process_call_transcript(call_id, customer_phone, settings)
+                        processed.append(call_id)
+                    except Exception as e:
+                        logger.error(f"Failed to process {call_id}: {e}")
+                        failed.append({"call_id": call_id, "error": str(e)})
+    
+    except Exception as e:
+        logger.error(f"Error fetching calls from VAPI: {e}")
+        failed.append({"error": str(e)})
+    
+    return {
+        "status": "completed",
+        "processed": len(processed),
+        "failed": len(failed),
+        "processed_calls": processed,
+        "failed_calls": failed
+    }
 
 
 @app.post("/call")
@@ -131,6 +256,28 @@ async def trigger_insurance_prospect_call(
     return JSONResponse(content=response, status_code=status.HTTP_202_ACCEPTED)
 
 
+async def _generate_embeddings(call_id: str, transcript: str) -> None:
+    """Async job to generate and store embeddings for a transcript.
+    
+    Args:
+        call_id: VAPI call ID
+        transcript: Full conversation transcript
+    """
+    try:
+        logger.info(f"Starting embedding generation for call {call_id}")
+        
+        # Generate embedding for full transcript
+        embedding = generate_embedding(transcript)
+        logger.info(f"Generated embedding for call {call_id} (1024 dims)")
+        
+        # Store embedding in database
+        store_embedding(call_id, embedding, embedding_type="full")
+        logger.info(f"Stored embedding for call {call_id}")
+        
+    except Exception as e:
+        logger.error(f"Error generating embeddings for call {call_id}: {e}")
+
+
 async def _handle_end_of_call_report(message: Dict[str, Any], settings: Settings) -> None:
     """Process an ``end-of-call-report`` payload."""
 
@@ -141,19 +288,42 @@ async def _handle_end_of_call_report(message: Dict[str, Any], settings: Settings
     ended_reason = message.get("endedReason")
     call_data = message.get("call", {})
     call_id = call_data.get("id") or message.get("id") or message.get("callId")
+    customer_number = call_data.get("phoneNumber")
 
-    logger.info("Call ended", extra={"ended_reason": ended_reason})
-    if transcript:
-        logger.info("Full transcript:\n%s", transcript)
-        await _persist_transcript(
-            transcript,
-            settings=settings,
-            call_id=call_id,
-            ended_reason=ended_reason,
-            recording=recording,
-            messages=messages,
-            raw_message=message,
-        )
+    logger.info("Call ended", extra={"ended_reason": ended_reason, "call_id": call_id})
+    
+    if transcript and call_id:
+        try:
+            # 1. Get or create customer by phone number
+            if customer_number:
+                customer = get_or_create_customer(customer_number)
+                logger.info(f"Customer {customer.id} identified: {customer.company_name}")
+            else:
+                logger.warning(f"No phone number in call {call_id}, using default customer")
+                customer = get_or_create_customer(settings.customer_phone_number)
+            
+            # 2. Store conversation with customer link
+            conv_result = store_conversation(call_id, customer.id, transcript)
+            logger.info(f"Stored conversation {conv_result.get('id')} for customer {customer.id}")
+            
+            # 3. Trigger async embedding generation (non-blocking)
+            asyncio.create_task(_generate_embeddings(call_id, transcript))
+            logger.info(f"Queued embedding generation for call {call_id}")
+            
+            # 4. Also persist to JSON for backward compatibility
+            await _persist_transcript(
+                transcript,
+                settings=settings,
+                call_id=call_id,
+                ended_reason=ended_reason,
+                recording=recording,
+                messages=messages,
+                raw_message=message,
+            )
+            
+        except Exception as e:
+            logger.error(f"Error handling end-of-call for {call_id}: {e}")
+    
     if recording:
         logger.info("Recording info", extra={"recording": recording})
 
@@ -206,7 +376,7 @@ async def _persist_transcript(
     messages: Optional[Any],
     raw_message: Dict[str, Any],
 ) -> None:
-    """Persist call transcript and metadata to disk."""
+    """Persist call transcript and metadata to disk (backward compatibility)."""
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     safe_call_id = call_id or "unknown"
@@ -231,4 +401,159 @@ async def _persist_transcript(
 
     await asyncio.to_thread(_write)
     logger.info("Stored transcript", extra={"path": str(file_path)})
+
+
+async def _process_call_transcript(call_id: str, customer_phone: str, settings: Settings) -> None:
+    """Fetch transcript from VAPI and store in database."""
+    try:
+        db = get_db()
+        
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            headers = {"Authorization": f"Bearer {settings.vapi_api_key}"}
+            response = await client.get(f"{_vapi_base_url}/call/{call_id}", headers=headers)
+            response.raise_for_status()
+            
+        call_data = response.json()
+        
+        # Check if call is ended and has transcript
+        if call_data.get("status") != "ended":
+            logger.debug(f"Call {call_id} not ended yet, will retry")
+            return
+        
+        artifact = call_data.get("artifact", {})
+        transcript = artifact.get("transcript")
+        
+        if not transcript:
+            logger.warning(f"No transcript found for call {call_id}")
+            return
+        
+        # Get or create customer
+        customer = get_or_create_customer(customer_phone)
+        logger.info(f"Processing transcript for customer {customer.first_name} {customer.last_name}")
+        
+        # Check if conversation already exists
+        existing = db.execute(
+            "SELECT id FROM conversations WHERE call_id = %s",
+            (call_id,)
+        )
+        
+        if not existing:
+            # Store conversation
+            conv_result = store_conversation(call_id, customer.id, transcript)
+            logger.info(f"Stored conversation {call_id} for customer {customer.id}")
+        else:
+            logger.debug(f"Conversation {call_id} already exists in database")
+        
+        # Generate and store embedding
+        try:
+            embedding = generate_embedding(transcript)
+            store_embedding(call_id, embedding, "full")
+            logger.info(f"✅ Generated and stored embedding for call {call_id}")
+        except Exception as e:
+            logger.warning(f"Failed to generate embedding for {call_id}: {e}")
+        
+        # Generate and store summary
+        try:
+            summary = await summarize_transcript(transcript)
+            if summary:
+                # Generate embedding for the summary
+                summary_embedding = generate_embedding(summary)
+                # Update conversation with summary and summary embedding
+                update_conversation_summary(call_id, summary, summary_embedding)
+                logger.info(f"✅ Generated and stored summary for call {call_id}")
+            else:
+                logger.warning(f"Failed to generate summary for {call_id}")
+        except Exception as e:
+            logger.warning(f"Failed to process summary for {call_id}: {e}")
+        
+        # Save transcript file to disk for reference
+        try:
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            target_dir = Path(settings.transcript_dir).expanduser()
+            target_dir.mkdir(parents=True, exist_ok=True)
+            
+            filename = target_dir / f"{timestamp}_{call_id}.json"
+            payload = {
+                "call_id": call_id,
+                "transcript": transcript,
+                "customer": {
+                    "id": str(customer.id),
+                    "name": f"{customer.first_name} {customer.last_name}",
+                    "phone": customer.phone_number,
+                    "company": customer.company_name
+                },
+                "created_at": datetime.now(timezone.utc).isoformat()
+            }
+            
+            def _write() -> None:
+                filename.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            
+            await asyncio.to_thread(_write)
+            logger.info(f"✅ Saved transcript to {filename}")
+        except Exception as e:
+            logger.warning(f"Failed to save transcript file for {call_id}: {e}")
+        
+        # Remove from pending calls
+        if call_id in _pending_calls:
+            del _pending_calls[call_id]
+        
+    except Exception as e:
+        logger.error(f"Error processing transcript for {call_id}: {e}")
+
+
+async def _poll_pending_calls() -> None:
+    """Background task to poll VAPI for pending call completions and generate embeddings."""
+    settings = get_settings()
+    db = get_db()
+    
+    # Track which calls we've already processed
+    processed_calls = set()
+    
+    while True:
+        try:
+            await asyncio.sleep(8)  # Poll every 8 seconds
+            
+            # 1. Process explicitly pending calls
+            calls_to_check = list(_pending_calls.items())
+            for call_id, call_info in calls_to_check:
+                if call_id not in processed_calls:
+                    logger.info(f"Processing pending call: {call_id}")
+                    await _process_call_transcript(call_id, call_info["customer_phone"], settings)
+                    processed_calls.add(call_id)
+            
+            # 2. Check for conversations without embeddings (already in DB)
+            results = db.execute(
+                """SELECT c.call_id, p.phone_number 
+                   FROM brokerage.conversations c
+                   LEFT JOIN brokerage.customers p ON c.customer_id = p.id
+                   LEFT JOIN brokerage.embeddings e ON c.call_id = e.call_id AND e.embedding_type = 'full'
+                   WHERE e.call_id IS NULL
+                   LIMIT 10""",
+                ()
+            )
+            
+            for row in results:
+                call_id = row['call_id']
+                phone = row['phone_number']
+                if call_id not in processed_calls:
+                    logger.info(f"Auto-processing conversation without embedding: {call_id}")
+                    await _process_call_transcript(call_id, phone, settings)
+                    processed_calls.add(call_id)
+        
+        except Exception as e:
+            logger.error(f"Error in polling task: {e}")
+            await asyncio.sleep(10)  # Back off on error
+
+
+@app.on_event("startup")
+async def startup_event() -> None:
+    """Start background tasks on app startup."""
+    logger.info("Starting background polling task for call transcripts")
+    asyncio.create_task(_poll_pending_calls())
+
+
+@app.on_event("shutdown")
+async def shutdown_event() -> None:
+    """Clean up resources on shutdown."""
+    close_db()
 

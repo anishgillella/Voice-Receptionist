@@ -159,6 +159,7 @@ async def initiate_outbound_call(
     metadata: Optional[Dict[str, Any]] = None,
     prospect_info: Optional[Dict[str, Any]] = None,
     call_type: str = "outbound",
+    system_prompt: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Trigger an outbound call via Vapi.
 
@@ -167,6 +168,7 @@ async def initiate_outbound_call(
         metadata: Optional metadata dict to include with the call.
         prospect_info: Insurance prospect information
         call_type: "outbound" or "inbound"
+        system_prompt: Optional custom system prompt (overrides default)
 
     Returns:
         Parsed JSON response from Vapi.
@@ -189,6 +191,21 @@ async def initiate_outbound_call(
     if call_metadata:
         payload["metadata"] = call_metadata
 
+    # If custom system prompt provided, override the assistant's system prompt
+    if system_prompt:
+        payload["assistantOverrides"] = {
+            "model": {
+                "provider": "openai",
+                "model": "gpt-4o-mini",
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": system_prompt,
+                    }
+                ]
+            }
+        }
+
     headers = {
         "Authorization": f"Bearer {settings.vapi_api_key}",
         "Content-Type": "application/json",
@@ -196,6 +213,10 @@ async def initiate_outbound_call(
 
     async with httpx.AsyncClient(base_url=VAPI_BASE_URL, timeout=30.0) as client:
         response = await client.post("/call", json=payload, headers=headers)
-        response.raise_for_status()
-        return response.json()
+        try:
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            print(f"VAPI Error Response: {e.response.text}")
+            raise
 
