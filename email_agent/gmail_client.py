@@ -8,6 +8,7 @@ import logging
 from io import BytesIO
 from pathlib import Path
 from typing import Optional
+import asyncio
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -275,6 +276,86 @@ class GmailClient:
             return file_data
         except HttpError as error:
             logger.error(f"An error occurred: {error}")
+            return None
+
+    def download_attachment_from_raw_email(self, service, message_id: str, filename: str) -> Optional[bytes]:
+        """Download attachment by parsing raw email format - works when attachment token expires."""
+        try:
+            import email
+            from email import policy
+            
+            # Get raw email
+            message = service.users().messages().get(
+                userId="me",
+                id=message_id,
+                format="raw"
+            ).execute()
+            
+            if 'raw' not in message:
+                logger.error("No raw email data available")
+                return None
+            
+            raw_email = base64.urlsafe_b64decode(message['raw'])
+            msg = email.message_from_bytes(raw_email, policy=policy.default)
+            
+            # Find attachment by filename
+            for part in msg.iter_parts():
+                if part.get_content_disposition() == 'attachment':
+                    if part.get_filename() == filename:
+                        return part.get_payload(decode=True)
+            
+            logger.warning(f"Attachment '{filename}' not found in email")
+            return None
+            
+        except Exception as error:
+            logger.error(f"Error downloading from raw email: {error}")
+            return None
+
+    async def download_attachment_async(
+        self,
+        message_id: str,
+        part_id: str,
+        filename: str,
+        service=None,
+        access_token: Optional[str] = None,
+        refresh_token: Optional[str] = None,
+        db=None,
+    ) -> Optional[bytes]:
+        """Async download attachment from a message."""
+        try:
+            # If no service provided, get default tokens and create service
+            if not service:
+                if not access_token:
+                    tokens = await self.get_default_tokens(db)
+                    if not tokens:
+                        logger.error("No Gmail tokens available")
+                        return None
+                    access_token = tokens.get("access_token")
+                    refresh_token = tokens.get("refresh_token")
+                
+                service = self.get_service(access_token, refresh_token)
+            
+            loop = asyncio.get_event_loop()
+            
+            # Try attachment API first
+            file_data = await loop.run_in_executor(
+                None,
+                lambda: self.download_attachment(service, message_id, part_id)
+            )
+            
+            if file_data:
+                return file_data
+            
+            # Fall back to raw email parsing
+            logger.info("Attachment API failed, falling back to raw email parsing...")
+            file_data = await loop.run_in_executor(
+                None,
+                lambda: self.download_attachment_from_raw_email(service, message_id, filename)
+            )
+            return file_data
+            
+        except Exception as error:
+            logger.error(f"Error downloading attachment: {error}")
             return None
 
     def send_email(

@@ -159,7 +159,7 @@ class VectorStore:
                 {
                     'query_embedding': query_embedding,
                     'customer_id': str(customer_id),
-                    'limit': limit,
+                    'max_results': limit,
                     'similarity_threshold': similarity_threshold
                 }
             ).execute()

@@ -110,7 +110,7 @@ class DocumentExtractor:
         logger.info(f"Extracting PDF with Mistral OCR: {filename}")
         
         loop = asyncio.get_event_loop()
-        content = await loop.run_in_executor(
+        ocr_result = await loop.run_in_executor(
             None,
             lambda: self.ocr.extract(
                 file_bytes=file_bytes,
@@ -118,39 +118,24 @@ class DocumentExtractor:
             )
         )
         
-        pages = []
-        all_text = []
-        images_metadata = []
+        # OCR extractor now returns a dict with 'chunks' key
+        if not ocr_result.get('success'):
+            logger.error(f"OCR failed: {ocr_result.get('error')}")
+            raise Exception(ocr_result.get('error', 'OCR extraction failed'))
         
-        for chunk_idx, chunk in enumerate(content.chunks, 1):
-            page_text = ""
-            page_images = []
-            
-            for content_item in chunk.contents:
-                if hasattr(content_item, 'content'):
-                    text = content_item.content
-                    page_text += text + "\n"
-                    all_text.append(text)
-                
-                if hasattr(content_item, 'mime_type') and 'image' in content_item.mime_type:
-                    page_images.append({
-                        "mime_type": content_item.mime_type,
-                        "size": len(content_item.content) if hasattr(content_item, 'content') else 0,
-                        "page": chunk_idx
-                    })
-                    images_metadata.append({
-                        "page": chunk_idx,
-                        "type": content_item.mime_type
-                    })
-            
+        ocr_chunks = ocr_result.get('chunks', [])
+        full_text = ocr_result.get('full_text', '')
+        
+        # Convert OCR chunks to our chunking format
+        pages = []
+        for chunk_idx, ocr_chunk in enumerate(ocr_chunks, 1):
             pages.append({
                 "page": chunk_idx,
-                "text": page_text.strip(),
-                "images": len(page_images)
+                "text": ocr_chunk.get('text', ''),
+                "tokens": ocr_chunk.get('tokens', 0)
             })
         
-        full_text = "\n".join(all_text)
-        
+        # Use the chunker to format pages
         chunks = self.chunker.chunk_by_pages(
             pages,
             metadata={
@@ -163,7 +148,7 @@ class DocumentExtractor:
         
         logger.info(
             f"✅ Extracted PDF: {filename} "
-            f"({len(pages)} pages, {len(full_text)} chars, {len(images_metadata)} images)"
+            f"({len(pages)} pages, {len(full_text)} chars)"
         )
         
         return {
@@ -175,7 +160,6 @@ class DocumentExtractor:
                 "email_id": str(email_id),
                 "document_id": str(document_id) if document_id else None,
                 "page_count": len(pages),
-                "image_count": len(images_metadata),
                 "extraction_method": "mistral_ocr",
                 "char_count": len(full_text),
                 "token_estimate": len(full_text.split())
