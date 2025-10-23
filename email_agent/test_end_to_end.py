@@ -98,7 +98,7 @@ except Exception as e:
 
 try:
     print("  Loading document_processor...")
-    from email_agent.document_processor import DocumentProcessor
+    from email_agent.document_processor.document_processor import DocumentProcessor
     print("    ✅ document_processor.DocumentProcessor")
 except Exception as e:
     print(f"    ❌ document_processor: {e}")

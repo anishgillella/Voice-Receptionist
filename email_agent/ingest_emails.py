@@ -8,7 +8,7 @@ from email_agent.config import email_settings
 from email_agent.db import EmailDatabase
 from email_agent.gmail_client import GmailClient
 from email_agent.s3_client import S3Client
-from email_agent.document_processor import DocumentProcessor
+from email_agent.document_processor.document_processor import DocumentProcessor
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

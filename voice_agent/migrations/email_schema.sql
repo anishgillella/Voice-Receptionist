@@ -331,3 +331,101 @@ BEGIN
     ORDER BY e.received_at;
 END;
 $$ LANGUAGE plpgsql STABLE;
+
+-- ====================================================================
+-- EMAIL CHUNKS TABLE FOR VECTOR SEARCH
+-- ====================================================================
+
+-- Create email_chunks table for storing document chunks with embeddings
+CREATE TABLE IF NOT EXISTS email_chunks (
+    id UUID PRIMARY KEY DEFAULT extensions.uuid_generate_v4(),
+    email_id UUID NOT NULL REFERENCES public.emails(id) ON DELETE CASCADE,
+    document_id UUID REFERENCES public.email_attachments(id) ON DELETE CASCADE,
+    customer_id UUID NOT NULL REFERENCES public.customers(id) ON DELETE CASCADE,
+    chunk_number INT NOT NULL,
+    text TEXT NOT NULL,
+    embedding vector(384),  -- SentenceTransformer all-MiniLM-L6-v2 dimension
+    tokens_count INT,
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Create indexes for efficient querying
+CREATE INDEX IF NOT EXISTS idx_email_chunks_customer_id ON email_chunks(customer_id);
+CREATE INDEX IF NOT EXISTS idx_email_chunks_email_id ON email_chunks(email_id);
+CREATE INDEX IF NOT EXISTS idx_email_chunks_document_id ON email_chunks(document_id);
+CREATE INDEX IF NOT EXISTS idx_email_chunks_embedding ON email_chunks USING ivfflat (embedding vector_cosine_ops);
+
+-- Enable RLS
+ALTER TABLE email_chunks ENABLE ROW LEVEL SECURITY;
+
+-- RLS Policy - Users can view their own email chunks
+CREATE POLICY "Users can view their own email chunks" ON email_chunks
+    FOR SELECT USING (auth.uid()::text = customer_id::text);
+
+-- ====================================================================
+-- VECTOR SEARCH FUNCTION
+-- ====================================================================
+
+CREATE OR REPLACE FUNCTION similarity_search_email_chunks(
+    query_embedding vector,
+    customer_id UUID,
+    limit INT DEFAULT 10,
+    similarity_threshold FLOAT DEFAULT 0.3
+)
+RETURNS TABLE (
+    id UUID,
+    email_id UUID,
+    document_id UUID,
+    chunk_number INT,
+    text TEXT,
+    tokens_count INT,
+    metadata JSONB,
+    similarity FLOAT
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        ec.id,
+        ec.email_id,
+        ec.document_id,
+        ec.chunk_number,
+        ec.text,
+        ec.tokens_count,
+        ec.metadata,
+        1 - (ec.embedding <=> query_embedding)::FLOAT as similarity
+    FROM email_chunks ec
+    WHERE ec.customer_id = $2
+    AND (1 - (ec.embedding <=> query_embedding)::FLOAT) >= similarity_threshold
+    ORDER BY ec.embedding <=> query_embedding
+    LIMIT limit;
+END;
+$$ LANGUAGE plpgsql STABLE;
+
+-- ====================================================================
+-- EXTRACTED TEXT COLUMN FOR ATTACHMENTS
+-- ====================================================================
+
+-- Add extracted text storage to email_attachments
+ALTER TABLE email_attachments ADD COLUMN IF NOT EXISTS extracted_text TEXT;
+ALTER TABLE email_attachments ADD COLUMN IF NOT EXISTS extraction_method VARCHAR(50);
+ALTER TABLE email_attachments ADD COLUMN IF NOT EXISTS page_count INT;
+ALTER TABLE email_attachments ADD COLUMN IF NOT EXISTS image_count INT;
+ALTER TABLE email_attachments ADD COLUMN IF NOT EXISTS token_estimate INT;
+
+-- Update updated_at trigger for email_attachments
+CREATE OR REPLACE FUNCTION update_email_attachments_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS email_attachments_updated_at_trigger ON email_attachments;
+
+CREATE TRIGGER email_attachments_updated_at_trigger
+BEFORE UPDATE ON email_attachments
+FOR EACH ROW
+EXECUTE FUNCTION update_email_attachments_updated_at();
