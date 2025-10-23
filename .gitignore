@@ -24,3 +24,32 @@ data/
 uvicorn.log
 
 update_phone_webhook.py
+
+# Email agent secrets
+email_agent/.env
+email_agent/gmail_tokens.json
+email_agent/*.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+Thumbs.db
+
+# Credentials & config files
+credentials.json
+*.pem
+*.key
+.aws/
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp
