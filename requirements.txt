@@ -16,3 +16,9 @@ supabase==2.7.2
 sentence-transformers==2.2.2
 redis==5.0.1
 protobuf==4.25.0
+logfire==0.29.0
+openai==1.40.6
+psycopg2-binary==2.9.10
+tensorrt==10.0.1
+numpy==1.24.3
+torch==2.1.0

@@ -24,10 +24,16 @@ from .db import (
     get_db,
     update_conversation_summary,
     get_table_name,
+    store_call_metrics,
+    store_call_judgment,
 )
 from .embeddings import generate_embedding
 import httpx
 from .summarization import summarize_transcript
+from .evaluation import judge_call, setup_logfire
+from .evaluation.logfire_tracing import log_call_metrics
+from .embedding_cache import get_redis_client, close_redis, get_cache_stats
+from .modal_client import get_modal_client, close_modal_client
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -62,9 +68,51 @@ class InsuranceProspectCallRequest(BaseModel):
 
 
 @app.get("/health")
-async def health() -> Dict[str, str]:
-    """Health check endpoint."""
-    return {"status": "ok"}
+async def health() -> Dict[str, Any]:
+    """Health check endpoint with service status."""
+    redis_client = get_redis_client()
+    modal_client = get_modal_client()
+    
+    # Check Redis
+    redis_status = "disabled"
+    if redis_client:
+        try:
+            redis_client.ping()
+            redis_status = "connected"
+        except Exception as e:
+            redis_status = f"error: {str(e)[:50]}"
+    
+    # Check Modal
+    modal_status = "disabled"
+    if modal_client and modal_client.available:
+        modal_status = "configured"
+    
+    return {
+        "status": "ok",
+        "services": {
+            "redis": redis_status,
+            "modal": modal_status,
+        },
+        "cache_stats": get_cache_stats() if redis_client else {"status": "disabled"},
+    }
+
+
+@app.get("/cache/stats")
+async def cache_stats() -> Dict[str, Any]:
+    """Get embedding cache statistics."""
+    return get_cache_stats()
+
+
+@app.post("/cache/clear")
+async def clear_cache() -> Dict[str, str]:
+    """Clear embedding cache (admin endpoint)."""
+    from .embedding_cache import clear_embedding_cache
+    
+    success = clear_embedding_cache()
+    return {
+        "status": "success" if success else "failed",
+        "message": "Cache cleared" if success else "Failed to clear cache",
+    }
 
 
 @app.post("/process-calls")
@@ -278,6 +326,77 @@ async def _generate_embeddings(call_id: str, transcript: str) -> None:
         logger.error(f"Error generating embeddings for call {call_id}: {e}")
 
 
+async def _judge_call_async(call_id: str, customer_id: str, transcript: str) -> None:
+    """Async job to judge call quality and extract metrics.
+    
+    Args:
+        call_id: VAPI call ID
+        customer_id: Customer UUID as string
+        transcript: Full conversation transcript
+    """
+    try:
+        from uuid import UUID
+        
+        logger.info(f"Starting call judgment for {call_id}")
+        
+        # Judge the call using LLM
+        judgment = await judge_call(transcript, call_id, UUID(customer_id))
+        
+        if not judgment:
+            logger.warning(f"Failed to generate judgment for call {call_id}")
+            return
+        
+        # Store metrics in database
+        metrics_result = store_call_metrics(
+            call_id=call_id,
+            customer_id=UUID(customer_id),
+            frc_achieved=judgment.metrics.frc_achieved,
+            frc_type=judgment.metrics.frc_type,
+            intent_detected=judgment.metrics.intent_detected,
+            intent_accuracy_score=judgment.metrics.intent_accuracy_score,
+            call_quality_score=judgment.metrics.call_quality_score,
+            customer_sentiment=judgment.metrics.customer_sentiment,
+            script_compliance_score=judgment.metrics.script_compliance_score,
+            key_objections=judgment.metrics.key_objections,
+            agent_responses_to_objections=judgment.metrics.agent_responses_to_objections,
+            next_steps_agreed=judgment.metrics.next_steps_agreed,
+            call_duration_seconds=judgment.metrics.call_duration_seconds,
+        )
+        
+        if metrics_result:
+            metrics_id = metrics_result.get("id")
+            
+            # Store judgment in database
+            store_call_judgment(
+                call_id=call_id,
+                customer_id=UUID(customer_id),
+                metrics_id=metrics_id,
+                judge_reasoning=judgment.judge_reasoning,
+                judge_model=judgment.judge_model,
+                strengths=judgment.strengths,
+                improvements=judgment.improvements,
+            )
+            
+            logger.info(f"✅ Call judgment complete for {call_id}")
+            
+            # Log to Logfire
+            log_call_metrics(
+                call_id,
+                {
+                    "frc_achieved": judgment.metrics.frc_achieved,
+                    "call_quality_score": judgment.metrics.call_quality_score,
+                    "intent_detected": judgment.metrics.intent_detected,
+                    "customer_sentiment": judgment.metrics.customer_sentiment,
+                    "script_compliance_score": judgment.metrics.script_compliance_score,
+                },
+            )
+        else:
+            logger.error(f"Failed to store metrics for call {call_id}")
+    
+    except Exception as e:
+        logger.error(f"Error judging call {call_id}: {e}")
+
+
 async def _handle_end_of_call_report(message: Dict[str, Any], settings: Settings) -> None:
     """Process an ``end-of-call-report`` payload."""
 
@@ -309,6 +428,10 @@ async def _handle_end_of_call_report(message: Dict[str, Any], settings: Settings
             # 3. Trigger async embedding generation (non-blocking)
             asyncio.create_task(_generate_embeddings(call_id, transcript))
             logger.info(f"Queued embedding generation for call {call_id}")
+            
+            # 3.5. Trigger async call judgment (non-blocking)
+            asyncio.create_task(_judge_call_async(call_id, str(customer.id), transcript))
+            logger.info(f"Queued call judgment for {call_id}")
             
             # 4. Also persist to JSON for backward compatibility
             await _persist_transcript(
@@ -549,11 +672,41 @@ async def _poll_pending_calls() -> None:
 async def startup_event() -> None:
     """Start background tasks on app startup."""
     logger.info("Starting background polling task for call transcripts")
+    
+    # Initialize Logfire
+    setup_logfire()
+    
+    # Initialize Redis
+    redis_client = get_redis_client()
+    if redis_client:
+        logger.info("✅ Redis cache initialized")
+    else:
+        logger.warning("⚠️  Redis not configured, embedding cache disabled")
+    
+    # Initialize Modal
+    modal_client = get_modal_client()
+    if modal_client.available:
+        logger.info(f"✅ Modal embedding service configured: {modal_client.modal_url}")
+    else:
+        logger.info("ℹ️  Modal embedding service not configured, will use local embeddings")
+    
+    # Start background task
     asyncio.create_task(_poll_pending_calls())
 
 
 @app.on_event("shutdown")
 async def shutdown_event() -> None:
     """Clean up resources on shutdown."""
+    logger.info("Shutting down...")
+    
+    # Close database
     close_db()
+    
+    # Close Redis
+    close_redis()
+    logger.info("✅ Redis connection closed")
+    
+    # Close Modal
+    await close_modal_client()
+    logger.info("✅ Modal client closed")
 

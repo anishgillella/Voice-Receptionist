@@ -121,3 +121,69 @@ class CustomerWithCallHistory(Customer):
     total_calls: int = 0
     last_call_date: Optional[datetime] = None
     call_history: list[Conversation] = []
+
+# ============================================================================
+# Call Evaluation Models
+# ============================================================================
+
+
+class CallMetrics(BaseModel):
+    """Extracted metrics from a single call evaluation."""
+
+    call_id: str
+    customer_id: UUID
+
+    # TIER 1: Critical metrics
+    frc_achieved: bool = Field(..., description="First Call Resolution - did they take action?")
+    frc_type: Optional[str] = Field(
+        None,
+        description="Type of resolution: quote, consultation_booked, follow_up_requested, none",
+    )
+    intent_detected: str = Field(..., description="Main customer intent detected")
+    intent_accuracy_score: float = Field(
+        default=0.0, ge=0.0, le=1.0, description="Confidence in intent detection (0-1)"
+    )
+
+    # TIER 2: Important metrics
+    call_quality_score: float = Field(
+        default=0.0, ge=0.0, le=1.0, description="Overall call quality (0-1)"
+    )
+    customer_sentiment: str = Field(
+        default="neutral", description="Customer sentiment: very_positive, positive, neutral, negative, very_negative"
+    )
+    script_compliance_score: float = Field(
+        default=0.0, ge=0.0, le=1.0, description="Adherence to system prompt (0-1)"
+    )
+
+    # Supporting data
+    key_objections: list[str] = Field(default_factory=list, description="Objections raised by customer")
+    agent_responses_to_objections: list[str] = Field(
+        default_factory=list, description="How agent handled each objection"
+    )
+    next_steps_agreed: Optional[str] = Field(None, description="What customer agreed to do next")
+    call_duration_seconds: int = Field(default=0, description="Total call duration in seconds")
+
+    created_at: datetime = Field(default_factory=datetime.now)
+
+    class Config:
+        from_attributes = True
+
+
+class CallJudgment(BaseModel):
+    """LLM judge evaluation of a call."""
+
+    call_id: str
+    customer_id: UUID
+
+    metrics: CallMetrics = Field(..., description="Extracted call metrics")
+    judge_reasoning: str = Field(..., description="Why judge scored this way")
+    judge_model: str = Field(default="gpt-5-nano", description="Which LLM model was used for judgment")
+
+    # Recommendations
+    strengths: list[str] = Field(default_factory=list, description="What agent did well")
+    improvements: list[str] = Field(default_factory=list, description="Areas for improvement")
+
+    created_at: datetime = Field(default_factory=datetime.now)
+
+    class Config:
+        from_attributes = True

@@ -11,6 +11,40 @@ from .config import settings, INSURANCE_PROSPECT_SYSTEM_PROMPT, INBOUND_PROSPECT
 VAPI_BASE_URL = "https://api.vapi.ai"
 
 
+def get_model_config_for_provider(provider: str = "cerebras") -> Dict[str, Any]:
+    """Get model configuration based on selected provider.
+    
+    Args:
+        provider: LLM provider (cerebras, openai, openrouter)
+        
+    Returns:
+        Model configuration dict for VAPI
+    """
+    if provider == "cerebras":
+        return {
+            "provider": "custom-llm",
+            "model": settings.cerebras_model,  # llama-3.1-70b by default
+            "baseUrl": "https://api.cerebras.ai/v1",
+            "apiKey": settings.cerebras_api_key,
+            "temperature": 0.7,
+            "maxTokens": 200,
+        }
+    elif provider == "openai":
+        return {
+            "provider": "openai",
+            "model": "gpt-4o-mini",
+            "temperature": 0.7,
+            "maxTokens": 200,
+        }
+    else:  # openrouter
+        return {
+            "provider": "openai",
+            "model": "gpt-4o-mini",
+            "temperature": 0.7,
+            "maxTokens": 200,
+        }
+
+
 def get_agent_id_for_call_type(call_type: str = "outbound") -> str:
     """Get the appropriate agent ID based on call type.
     
@@ -75,17 +109,13 @@ async def create_or_update_insurance_agent(
     
     payload: Dict[str, Any] = {
         "name": agent_name,
-        "model": {
-            "provider": "openai",
-            "model": "gpt-4o-mini",
+        "model": get_model_config_for_provider(settings.llm_provider) | {
             "messages": [
                 {
                     "role": "system",
                     "content": system_prompt,
                 }
             ],
-            "temperature": 0.7,
-            "maxTokens": 500,
         },
         "voice": {
             "provider": "11labs",  # ElevenLabs - use '11labs' not 'elevenlabs'

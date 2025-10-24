@@ -1,4 +1,4 @@
-"""Embedding generation using BGE-Large model from HuggingFace."""
+"""Embedding generation using BGE-Large model with Redis caching and TensorRT optimization."""
 
 from __future__ import annotations
 
@@ -9,11 +9,20 @@ from sentence_transformers import SentenceTransformer
 from huggingface_hub import login
 
 from .config import settings
+from .embedding_cache import get_cached_embedding, cache_embedding, get_cache_stats
 
 logger = logging.getLogger(__name__)
 
 # Global model instance (loaded once)
 _model_instance: Optional[SentenceTransformer] = None
+
+# Try to import TensorRT
+try:
+    from .tensorrt_embeddings import get_tensorrt_embeddings
+    TENSORRT_AVAILABLE = True
+except ImportError:
+    TENSORRT_AVAILABLE = False
+    logger.warning("TensorRT not available, will use CPU embeddings")
 
 
 def get_embedding_model() -> SentenceTransformer:
@@ -37,37 +46,122 @@ def get_embedding_model() -> SentenceTransformer:
     return _model_instance
 
 
-def generate_embedding(text: str) -> list[float]:
-    """Generate embedding vector for text using BGE-Large.
+def generate_embedding(text: str, use_cache: bool = True) -> list[float]:
+    """Generate embedding vector for text using BGE-Large with caching.
 
     Args:
         text: Text to embed
+        use_cache: Whether to use Redis cache
 
     Returns:
         1024-dimensional embedding vector
     """
     try:
+        # Step 1: Try Redis cache first
+        if use_cache:
+            cached = get_cached_embedding(text)
+            if cached:
+                logger.debug(f"✅ Cache hit for embedding")
+                return cached
+        
+        # Step 2: Try TensorRT (GPU optimized)
+        if TENSORRT_AVAILABLE and settings.use_tensorrt:
+            try:
+                logger.debug(f"Generating embedding via TensorRT (GPU)")
+                embeddings = get_tensorrt_embeddings()
+                embedding = embeddings.encode(text, normalize_embeddings=True)
+                
+                # Cache the result
+                if use_cache:
+                    cache_embedding(text, embedding)
+                
+                return embedding
+            except Exception as e:
+                logger.warning(f"TensorRT generation failed, falling back to CPU: {e}")
+        
+        # Step 3: Fallback to CPU model
+        logger.debug(f"Generating embedding via CPU")
         model = get_embedding_model()
         embedding = model.encode(text, normalize_embeddings=True)
-        return embedding.tolist()
+        embedding_list = embedding.tolist()
+        
+        # Cache the result
+        if use_cache:
+            cache_embedding(text, embedding_list)
+        
+        return embedding_list
+        
     except Exception as e:
         logger.error(f"Error generating embedding: {e}")
         raise
 
 
-def generate_embeddings_batch(texts: list[str]) -> list[list[float]]:
-    """Generate embeddings for multiple texts.
+def generate_embeddings_batch(texts: list[str], use_cache: bool = True) -> list[list[float]]:
+    """Generate embeddings for multiple texts with batching and caching.
 
     Args:
         texts: List of texts to embed
+        use_cache: Whether to use Redis cache
 
     Returns:
         List of embedding vectors
     """
     try:
-        model = get_embedding_model()
-        embeddings = model.encode(texts, normalize_embeddings=True)
-        return [e.tolist() for e in embeddings]
+        # Check cache for each text
+        embeddings = []
+        texts_to_generate = []
+        indices_to_generate = []
+        
+        if use_cache:
+            for i, text in enumerate(texts):
+                cached = get_cached_embedding(text)
+                if cached:
+                    embeddings.append(cached)
+                    logger.debug(f"✅ Cache hit for batch item {i}")
+                else:
+                    embeddings.append(None)
+                    texts_to_generate.append(text)
+                    indices_to_generate.append(i)
+        else:
+            texts_to_generate = texts
+            indices_to_generate = list(range(len(texts)))
+            embeddings = [None] * len(texts)
+        
+        # Generate embeddings for cache misses
+        if texts_to_generate:
+            # Try TensorRT first
+            if TENSORRT_AVAILABLE and settings.use_tensorrt:
+                try:
+                    logger.debug(f"Generating {len(texts_to_generate)} embeddings via TensorRT batch")
+                    embeddings_gen = get_tensorrt_embeddings()
+                    generated = embeddings_gen.encode_batch(texts_to_generate, normalize_embeddings=True)
+                    
+                    # Place generated embeddings in correct positions
+                    for idx, text, embedding in zip(indices_to_generate, texts_to_generate, generated):
+                        embeddings[idx] = embedding
+                        if use_cache:
+                            cache_embedding(text, embedding)
+                    
+                except Exception as e:
+                    logger.warning(f"TensorRT batch generation failed, falling back to CPU: {e}")
+                    # Fall through to CPU
+                    embeddings = None
+            
+            # Fallback to CPU if needed
+            if embeddings is None or any(e is None for e in embeddings):
+                logger.debug(f"Generating {len(texts_to_generate)} embeddings via CPU batch")
+                model = get_embedding_model()
+                generated = model.encode(texts_to_generate, normalize_embeddings=True)
+                
+                embeddings = [None] * len(texts)
+                for idx, text, embedding in zip(indices_to_generate, texts_to_generate, generated):
+                    embedding_list = embedding.tolist()
+                    embeddings[idx] = embedding_list
+                    if use_cache:
+                        cache_embedding(text, embedding_list)
+        
+        return embeddings
+        
     except Exception as e:
         logger.error(f"Error generating batch embeddings: {e}")
         raise
@@ -124,4 +218,12 @@ def model_cleanup() -> None:
     if _model_instance is not None:
         logger.info("Cleaning up embedding model")
         _model_instance = None
+    
+    # Clean up TensorRT resources if available
+    if TENSORRT_AVAILABLE:
+        try:
+            from .tensorrt_embeddings import cleanup
+            cleanup()
+        except Exception as e:
+            logger.warning(f"Error cleaning up TensorRT: {e}")
 

@@ -93,9 +93,14 @@ class ContextManager:
             if len(conversations) <= top_k:
                 return conversations
 
-            # Generate embedding for current topic
+            # Generate embedding for current topic (using optimized method)
             try:
-                topic_embedding = generate_embedding(current_topic)
+                # Use generate_embedding which handles:
+                # 1. Redis cache
+                # 2. Modal GPU (if configured)
+                # 3. Local TensorRT (if enabled)
+                # 4. CPU fallback
+                topic_embedding = generate_embedding(current_topic, use_cache=True)
             except Exception as e:
                 logger.warning(f"Failed to generate topic embedding: {e}")
                 # Fallback: return most recent conversations

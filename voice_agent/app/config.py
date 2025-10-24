@@ -96,6 +96,26 @@ class Settings(BaseSettings):
     openrouter_api_key: Optional[str] = Field(None, alias="OPENROUTER_API_KEY")
     summarization_model: str = Field(default="openai/gpt-5-nano", alias="SUMMARIZATION_MODEL")
 
+    # Logfire Configuration (for evaluation tracing)
+    logfire_api_key: Optional[str] = Field(None, alias="LOGFIRE_API_KEY")
+
+    # Cerebras Configuration (for fast LLM inference)
+    cerebras_api_key: Optional[str] = Field(None, alias="CEREBRAS_API_KEY")
+    llm_provider: str = Field(default="cerebras", alias="LLM_PROVIDER")
+    cerebras_model: str = Field(default="gpt-oss-120b", alias="CEREBRAS_MODEL")
+
+    # Redis Configuration (for embedding caching)
+    redis_url: Optional[str] = Field(None, alias="REDIS_URL")
+    embedding_cache_ttl: int = Field(default=86400, alias="EMBEDDING_CACHE_TTL")  # 24 hours
+    
+    # TensorRT Configuration (for GPU-optimized embeddings)
+    use_tensorrt: bool = Field(default=False, alias="USE_TENSORRT")
+    tensorrt_device: str = Field(default="cuda:0", alias="TENSORRT_DEVICE")
+    tensorrt_cache_dir: Path = Field(default=Path("./tensorrt_cache"), alias="TENSORRT_CACHE_DIR")
+
+    # Modal Configuration (for embedding service)
+    modal_embedding_url: Optional[str] = Field(None, alias="MODAL_EMBEDDING_URL")
+
     # Customer Configuration
     customer_phone_number: str = Field(default="4698674545", alias="CUSTOMER_PHONE_NUMBER")
     customer_first_name: Optional[str] = Field(None, alias="CUSTOMER_FIRST_NAME")
