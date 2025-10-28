@@ -95,18 +95,21 @@ class Settings(BaseSettings):
     # OpenRouter Configuration (for summarization)
     openrouter_api_key: Optional[str] = Field(None, alias="OPENROUTER_API_KEY")
     openrouter_base_url: str = Field(default="https://openrouter.ai/api/v1", alias="OPENROUTER_BASE_URL")
+    openrouter_model: str = Field(default="openai/gpt-4o-mini", alias="OPENROUTER_MODEL")
+    summarization_model: str = Field(default="openai/gpt-4o-mini", alias="SUMMARIZATION_MODEL")
     
     # SendGrid Configuration
     sendgrid_api_key: Optional[str] = Field(None, alias="SENDGRID_API_KEY")
     sender_email: str = Field(default="noreply@insureflow.com", alias="SENDER_EMAIL")
     sender_name: str = Field(default="InsureFlow Solutions", alias="SENDER_NAME")
+    sendgrid_webhook_url: Optional[str] = Field(None, alias="SENDGRID_WEBHOOK_URL")
 
     # Logfire Configuration (for evaluation tracing)
     logfire_api_key: Optional[str] = Field(None, alias="LOGFIRE_API_KEY")
 
     # Cerebras Configuration (for fast LLM inference)
     cerebras_api_key: Optional[str] = Field(None, alias="CEREBRAS_API_KEY")
-    llm_provider: str = Field(default="cerebras", alias="LLM_PROVIDER")
+    llm_provider: str = Field(default="openrouter", alias="LLM_PROVIDER")
     cerebras_model: str = Field(default="gpt-oss-120b", alias="CEREBRAS_MODEL")
 
     # Redis Configuration (for embedding caching)

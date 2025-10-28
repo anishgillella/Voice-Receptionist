@@ -150,11 +150,21 @@ def get_or_create_customer(phone_number: str) -> Customer:
 
 
 def get_customer_by_id(customer_id: UUID) -> Optional[Customer]:
-    """Get customer by ID."""
-    db = get_db()
+    """Get customer by UUID."""
     query = f"SELECT id, company_name, phone_number, first_name, last_name, email, industry, location, created_at FROM {get_table_name('customers')} WHERE id = %s"
+    db = get_db()
     result = db.execute_one(query, (str(customer_id),))
-    return Customer(**result) if result else None
+    if result:
+        return Customer(**result)
+    return None
+
+
+def get_customer_by_email(email: str) -> Optional[Dict[str, Any]]:
+    """Get customer by email address."""
+    db = get_db()
+    query = f"SELECT id, company_name, phone_number, first_name, last_name, email, industry, location, created_at FROM {get_table_name('customers')} WHERE email = %s"
+    result = db.execute_one(query, (email,))
+    return dict(result) if result else None
 
 
 def get_customer_call_count(customer_id: UUID) -> int:
@@ -232,7 +242,7 @@ def update_conversation_summary(call_id: str, summary: str, summary_embedding: O
 def get_customer_conversations(customer_id: UUID, limit: int = 10) -> list[Dict[str, Any]]:
     """Get recent conversations for a customer."""
     db = get_db()
-    query = """
+    query = f"""
         SELECT id, call_id, customer_id, transcript, summary, created_at
         FROM {get_table_name('conversations')}
         WHERE customer_id = %s
@@ -591,4 +601,181 @@ def get_call_quality_stats(customer_id: Optional[UUID] = None) -> Dict[str, Any]
         result = db.execute_one(query, ())
     
     return dict(result) if result else {}
+
+
+def store_email_reply(
+    customer_id: UUID,
+    from_email: str,
+    to_email: str,
+    subject: str,
+    body: str,
+    email_type: str = "reply",  # "reply", "initial", etc.
+) -> Optional[Dict[str, Any]]:
+    """Store email reply from customer.
+    
+    Args:
+        customer_id: Customer UUID
+        from_email: Sender email
+        to_email: Recipient email
+        subject: Email subject
+        body: Email body content
+        email_type: Type of email
+        
+    Returns:
+        Dictionary with stored email or None if failed
+    """
+    db = get_db()
+    email_id = str(uuid4())
+    
+    try:
+        insert_query = f"""
+            INSERT INTO {get_table_name('email_conversations')} (
+                id, customer_id, from_email, to_email, subject, body, email_type, created_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+            RETURNING id, customer_id, from_email, to_email, subject, created_at
+        """
+        
+        result = db.insert(
+            insert_query,
+            (email_id, str(customer_id), from_email, to_email, subject, body, email_type),
+        )
+        
+        logger.info(f"✅ Stored email reply for customer {customer_id}: {subject}")
+        return dict(result) if result else None
+    
+    except Exception as e:
+        logger.error(f"Failed to store email reply for customer {customer_id}: {e}")
+        return None
+
+
+def get_customer_emails(customer_id: UUID, limit: int = 20) -> list[Dict[str, Any]]:
+    """Get email conversation history for a customer.
+    
+    Args:
+        customer_id: Customer UUID
+        limit: Maximum number of emails to return
+        
+    Returns:
+        List of email records
+    """
+    db = get_db()
+    
+    query = f"""
+        SELECT id, customer_id, from_email, to_email, subject, body, email_type, created_at
+        FROM {get_table_name('email_conversations')}
+        WHERE customer_id = %s
+        ORDER BY created_at DESC
+        LIMIT %s
+    """
+    results = db.execute(query, (str(customer_id), limit))
+    return [dict(r) for r in results]
+
+
+def store_email_analysis(
+    customer_id: UUID,
+    email_id: str,
+    sentiment: str,
+    engagement_level: str,
+    customer_intent: str,
+    interest_change: str,
+    actions: list[str],
+    suggested_next_steps: str,
+) -> Optional[Dict[str, Any]]:
+    """Store analysis of an email reply.
+    
+    Args:
+        customer_id: Customer UUID
+        email_id: Email record ID
+        sentiment: Email sentiment
+        engagement_level: Customer engagement level
+        customer_intent: What customer is trying to accomplish
+        interest_change: How interest changed
+        actions: Recommended actions
+        suggested_next_steps: Next steps
+        
+    Returns:
+        Dictionary with stored analysis or None if failed
+    """
+    db = get_db()
+    analysis_id = str(uuid4())
+    
+    try:
+        # Convert list to PostgreSQL array
+        actions_str = "{" + ",".join([f'"{a}"' for a in actions]) + "}"
+        
+        insert_query = f"""
+            INSERT INTO {get_table_name('email_analysis')} (
+                id, customer_id, email_id, sentiment, engagement_level, customer_intent,
+                interest_change, actions, suggested_next_steps, created_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+            RETURNING id, customer_id, email_id, sentiment, engagement_level, created_at
+        """
+        
+        result = db.insert(
+            insert_query,
+            (
+                analysis_id,
+                str(customer_id),
+                email_id,
+                sentiment,
+                engagement_level,
+                customer_intent,
+                interest_change,
+                actions_str,
+                suggested_next_steps,
+            ),
+        )
+        
+        logger.info(f"✅ Stored email analysis for {email_id}: sentiment={sentiment}, intent={customer_intent}")
+        return dict(result) if result else None
+    
+    except Exception as e:
+        logger.error(f"Failed to store email analysis for {email_id}: {e}")
+        return None
+
+
+def store_auto_response(
+    customer_id: UUID,
+    email_id: str,
+    response_body: str,
+    template_used: str,
+    action_type: str,
+) -> Optional[Dict[str, Any]]:
+    """Store auto-generated response sent to customer.
+    
+    Args:
+        customer_id: Customer UUID
+        email_id: ID of email that triggered response
+        response_body: Content of response sent
+        template_used: Template name used
+        action_type: Type of action that generated response
+        
+    Returns:
+        Dictionary with stored response or None if failed
+    """
+    db = get_db()
+    response_id = str(uuid4())
+    
+    try:
+        insert_query = f"""
+            INSERT INTO {get_table_name('auto_responses')} (
+                id, customer_id, email_id, response_body, template_used, action_type, created_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, NOW())
+            RETURNING id, customer_id, email_id, template_used, action_type, created_at
+        """
+        
+        result = db.insert(
+            insert_query,
+            (response_id, str(customer_id), email_id, response_body, template_used, action_type),
+        )
+        
+        logger.info(f"✅ Stored auto-response for {email_id} using template {template_used}")
+        return dict(result) if result else None
+    
+    except Exception as e:
+        logger.error(f"Failed to store auto-response for {email_id}: {e}")
+        return None
 

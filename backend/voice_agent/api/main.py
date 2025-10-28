@@ -26,6 +26,12 @@ from ..core.db import (
     get_table_name,
     store_call_metrics,
     store_call_judgment,
+    get_customer_by_email,
+    store_email_reply,
+    get_customer_emails,
+    store_email_analysis,
+    store_auto_response,
+    get_customer_conversations,
 )
 from ..llm.embeddings import generate_embedding
 import httpx
@@ -34,8 +40,10 @@ from ..evaluation import judge_call, setup_logfire
 from ..evaluation.logfire_tracing import log_call_metrics
 from ..services.embedding_cache import get_redis_client, close_redis, get_cache_stats
 from ..services.modal_client import get_modal_client, close_modal_client
-from ..services.call_actions import CallActionDetector
+from ..llm.call_analyzer import LLMCallAnalyzer
 from ..services.email_sender import EmailSender
+from ..llm.email_reply_analyzer import EmailReplyAnalyzer
+from ..services.email_response_templates import EmailResponseTemplates, ResponseTemplate
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -491,6 +499,220 @@ async def webhook(request: Request) -> Dict[str, str]:
     return {"status": "received"}
 
 
+@app.post("/webhooks/sendgrid/inbound-parse")
+async def sendgrid_inbound_webhook(request: Request) -> JSONResponse:
+    """Handle inbound emails from SendGrid.
+    
+    SendGrid will POST email content here when customer replies.
+    """
+    try:
+        # Parse form data from SendGrid
+        form_data = await request.form()
+        
+        from_email = form_data.get("from", "unknown@example.com")
+        to_email = form_data.get("to", "unknown@example.com")
+        subject = form_data.get("subject", "(No Subject)")
+        text_body = form_data.get("text", "")
+        html_body = form_data.get("html", "")
+        
+        # Use text or HTML, prefer text
+        email_body = text_body or html_body or ""
+        
+        logger.info(f"📧 Received email webhook: {subject} from {from_email}")
+        
+        # Find customer by email
+        customer = get_customer_by_email(to_email)  # We need to add this function
+        if not customer:
+            logger.warning(f"Customer not found for email {to_email}")
+            return JSONResponse({"status": "ok"}, status_code=200)
+        
+        customer_id = customer.get("id")
+        
+        # Store email reply
+        email_record = store_email_reply(
+            customer_id=customer_id,
+            from_email=from_email,
+            to_email=to_email,
+            subject=subject,
+            body=email_body,
+            email_type="reply"
+        )
+        
+        if not email_record:
+            logger.error(f"Failed to store email from {from_email}")
+            return JSONResponse({"status": "failed"}, status_code=500)
+        
+        email_id = email_record.get("id")
+        
+        # Get full customer context
+        customer_name = f"{customer.get('first_name', '')} {customer.get('last_name', '')}".strip()
+        
+        # Get previous call summary
+        conversations = get_customer_conversations(customer_id, limit=1)
+        previous_call_summary = conversations[0].get("summary") if conversations else None
+        
+        # Get past emails for context
+        past_emails_records = get_customer_emails(customer_id, limit=10)
+        past_emails = [f"From: {e['from_email']}\nTo: {e['to_email']}\nSubject: {e['subject']}\n\n{e['body']}" for e in past_emails_records]
+        
+        customer_profile = {
+            "name": customer_name,
+            "email": customer.get("email"),
+            "phone": customer.get("phone_number"),
+            "company": customer.get("company_name"),
+            "industry": customer.get("industry"),
+            "location": customer.get("location"),
+        }
+        
+        # Analyze email reply with LLM
+        analyzer = EmailReplyAnalyzer(settings=settings)
+        analysis = await analyzer.analyze(
+            email_reply=email_body,
+            previous_call_summary=previous_call_summary,
+            past_emails=past_emails,
+            customer_profile=customer_profile,
+        )
+        
+        logger.info(f"✅ Email analyzed")
+        logger.info(f"  Sentiment: {analysis.sentiment}")
+        logger.info(f"  Engagement: {analysis.engagement_level}")
+        logger.info(f"  Intent: {analysis.customer_intent}")
+        logger.info(f"  Actions: {[a.type.value for a in analysis.actions]}")
+        
+        # Store analysis
+        store_email_analysis(
+            customer_id=customer_id,
+            email_id=email_id,
+            sentiment=analysis.sentiment,
+            engagement_level=analysis.engagement_level,
+            customer_intent=analysis.customer_intent,
+            interest_change=analysis.interest_change,
+            actions=[a.type.value for a in analysis.actions],
+            suggested_next_steps=analysis.suggested_next_steps,
+        )
+        
+        # Execute recommended actions
+        for action in analysis.actions:
+            logger.info(f"Executing action: {action.type.value} (reason: {action.reason})")
+            
+            if action.type.value == "send_response":
+                try:
+                    # Suggest appropriate template
+                    template_type = EmailResponseTemplates.suggest_template(
+                        action.type.value,
+                        analysis.sentiment,
+                        analysis.engagement_level,
+                    )
+                    
+                    if template_type:
+                        # Render response from template
+                        response_body = EmailResponseTemplates.render_template(
+                            template_type,
+                            customer_name=customer_name,
+                            agent_name="InsureFlow Solutions",
+                            company_name="InsureFlow Solutions",
+                            topic="insurance solutions",
+                            meeting_time="next week",
+                        )
+                        
+                        # Send response email
+                        email_sender = EmailSender(settings=settings)
+                        success = email_sender.send_email(
+                            to_email=from_email,
+                            to_name=customer_name,
+                            subject=f"Re: {subject}",
+                            body=response_body,
+                        )
+                        
+                        if success:
+                            logger.info(f"✅ Sent auto-response to {from_email}")
+                            store_auto_response(
+                                customer_id=customer_id,
+                                email_id=email_id,
+                                response_body=response_body,
+                                template_used=template_type.value,
+                                action_type=action.type.value,
+                            )
+                        else:
+                            logger.warning(f"Failed to send response to {from_email}")
+                
+                except Exception as e:
+                    logger.error(f"Error sending response: {e}")
+            
+            elif action.type.value == "schedule_callback":
+                logger.info(f"Customer {customer_name} requested callback")
+                # TODO: Integrate with calendar system or store for sales team
+                store_auto_response(
+                    customer_id=customer_id,
+                    email_id=email_id,
+                    response_body="Callback scheduled",
+                    template_used="callback_scheduled",
+                    action_type=action.type.value,
+                )
+            
+            elif action.type.value == "escalate_to_sales":
+                logger.info(f"Escalating {customer_name} to sales team")
+                store_auto_response(
+                    customer_id=customer_id,
+                    email_id=email_id,
+                    response_body="Case escalated to sales team",
+                    template_used="escalation_notice",
+                    action_type=action.type.value,
+                )
+        
+        logger.info(f"✅ Email webhook processed successfully for {customer_name}")
+        return JSONResponse({"status": "ok"}, status_code=200)
+    
+    except Exception as e:
+        logger.error(f"Error processing SendGrid webhook: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+
+@app.on_event("startup")
+async def startup_event() -> None:
+    """Start background tasks on app startup."""
+    logger.info("Starting background polling task for call transcripts")
+    
+    # Initialize Logfire
+    setup_logfire()
+    
+    # Initialize Redis
+    redis_client = get_redis_client()
+    if redis_client:
+        logger.info("✅ Redis cache initialized")
+    else:
+        logger.warning("⚠️  Redis not configured, embedding cache disabled")
+    
+    # Initialize Modal
+    modal_client = get_modal_client()
+    if modal_client.available:
+        logger.info(f"✅ Modal embedding service configured: {modal_client.modal_url}")
+    else:
+        logger.info("ℹ️  Modal embedding service not configured, will use local embeddings")
+    
+    # Start background task
+    asyncio.create_task(_poll_pending_calls())
+
+
+@app.on_event("shutdown")
+async def shutdown_event() -> None:
+    """Clean up resources on shutdown."""
+    logger.info("Shutting down...")
+    
+    # Close database
+    close_db()
+    
+    # Close Redis
+    close_redis()
+    logger.info("✅ Redis connection closed")
+    
+    # Close Modal
+    await close_modal_client()
+    logger.info("✅ Modal client closed")
+
+
 async def _persist_transcript(
     transcript: str,
     *,
@@ -624,56 +846,74 @@ async def _process_call_transcript(call_id: str, customer_phone: str, settings: 
         except Exception as e:
             logger.warning(f"Failed to process summary for {call_id}: {e}")
         
-        # Parse transcript into structured messages
-        parsed_messages = parse_transcript(transcript)
-        
-        # Detect intents and recommend actions
+        # Detect intents and recommend actions using LLM
         try:
-            action_detector = CallActionDetector()
-            intents = action_detector.detect_intents(transcript, parsed_messages)
-            actions = action_detector.get_recommended_actions(intents)
+            call_analyzer = LLMCallAnalyzer(settings=settings)
+            analysis_result = await call_analyzer.analyze(transcript)
             
-            logger.info(f"Detected intents: {[i.value for i in intents]}")
-            logger.info(f"Recommended actions: {actions}")
+            logger.info(f"✅ Call analyzed")
+            logger.info(f"  Sentiment: {analysis_result.sentiment}")
+            logger.info(f"  Interest level: {analysis_result.customer_interest_level}")
+            logger.info(f"  Actions: {[a.type.value for a in analysis_result.actions]}")
             
             # Execute recommended actions
-            if actions.get("send_email"):
-                try:
-                    email_sender = EmailSender(settings=settings)
-                    success = email_sender.send_from_template(
-                        to_email=customer.email or customer.phone_number,
-                        to_name=f"{customer.first_name} {customer.last_name}",
-                        first_name=customer.first_name,
-                        company_name=customer.company_name,
-                        template_key="follow_up_info"
-                    )
-                    
-                    if success:
-                        logger.info(f"✅ Sent follow-up email to {customer.email}")
-                        # Store action in database
-                        store_customer_memory(
-                            call_id=call_id,
-                            customer_id=customer.id,
-                            memory_type="email_sent",
-                            content=f"Follow-up email sent (action: {actions['reason']})"
+            for action in analysis_result.actions:
+                logger.info(f"Executing action: {action.type.value} (reason: {action.reason})")
+                
+                if action.type.value == "send_email":
+                    try:
+                        email_sender = EmailSender(settings=settings)
+                        success = email_sender.send_from_template(
+                            to_email=customer.email or customer.phone_number,
+                            to_name=f"{customer.first_name} {customer.last_name}",
+                            first_name=customer.first_name,
+                            company_name=customer.company_name,
+                            template_key="follow_up_info"
                         )
-                    else:
-                        logger.warning(f"Failed to send email to {customer.email}")
-                except Exception as e:
-                    logger.warning(f"Error sending email: {e}")
-            
-            if actions.get("add_to_dnc"):
-                logger.info(f"Adding {customer.phone_number} to Do Not Call list")
-                # TODO: Implement DNC list logic
-                store_customer_memory(
-                    call_id=call_id,
-                    customer_id=customer.id,
-                    memory_type="dnc_flag",
-                    content="Customer explicitly not interested"
-                )
+                        
+                        if success:
+                            logger.info(f"✅ Sent follow-up email to {customer.email}")
+                            # Store action in database
+                            store_customer_memory(
+                                call_id=call_id,
+                                customer_id=customer.id,
+                                memory_type="email_sent",
+                                content=f"Follow-up email sent: {action.reason}"
+                            )
+                        else:
+                            logger.warning(f"Failed to send email to {customer.email}")
+                    except Exception as e:
+                        logger.warning(f"Error sending email: {e}")
+                
+                elif action.type.value == "add_to_dnc":
+                    logger.info(f"Adding {customer.phone_number} to Do Not Call list")
+                    store_customer_memory(
+                        call_id=call_id,
+                        customer_id=customer.id,
+                        memory_type="dnc_flag",
+                        content=f"Customer marked DNC: {action.reason}"
+                    )
+                
+                elif action.type.value == "schedule_callback":
+                    logger.info(f"Scheduling callback for {customer.phone_number}")
+                    store_customer_memory(
+                        call_id=call_id,
+                        customer_id=customer.id,
+                        memory_type="callback_scheduled",
+                        content=f"Callback scheduled: {action.reason}"
+                    )
+                
+                elif action.type.value == "add_to_followup":
+                    logger.info(f"Adding {customer.company_name} to follow-up list")
+                    store_customer_memory(
+                        call_id=call_id,
+                        customer_id=customer.id,
+                        memory_type="followup_required",
+                        content=f"Follow-up needed: {action.reason}"
+                    )
         
         except Exception as e:
-            logger.warning(f"Error detecting intents: {e}")
+            logger.warning(f"Error analyzing call: {e}")
         
         # Save transcript file to disk for reference with both raw and parsed formats
         try:
@@ -686,10 +926,10 @@ async def _process_call_transcript(call_id: str, customer_phone: str, settings: 
                 "call_id": call_id,
                 "raw_transcript": transcript,
                 "parsed_transcript": {
-                    "messages": parsed_messages,
-                    "message_count": len(parsed_messages),
-                    "agent_messages": len([m for m in parsed_messages if m["role"] == "agent"]),
-                    "customer_messages": len([m for m in parsed_messages if m["role"] == "customer"])
+                    "messages": parse_transcript(transcript),
+                    "message_count": len(parse_transcript(transcript)),
+                    "agent_messages": len([m for m in parse_transcript(transcript) if m["role"] == "agent"]),
+                    "customer_messages": len([m for m in parse_transcript(transcript) if m["role"] == "customer"])
                 },
                 "customer": {
                     "id": str(customer.id),
@@ -758,47 +998,4 @@ async def _poll_pending_calls() -> None:
         except Exception as e:
             logger.error(f"Error in polling task: {e}")
             await asyncio.sleep(10)  # Back off on error
-
-
-@app.on_event("startup")
-async def startup_event() -> None:
-    """Start background tasks on app startup."""
-    logger.info("Starting background polling task for call transcripts")
-    
-    # Initialize Logfire
-    setup_logfire()
-    
-    # Initialize Redis
-    redis_client = get_redis_client()
-    if redis_client:
-        logger.info("✅ Redis cache initialized")
-    else:
-        logger.warning("⚠️  Redis not configured, embedding cache disabled")
-    
-    # Initialize Modal
-    modal_client = get_modal_client()
-    if modal_client.available:
-        logger.info(f"✅ Modal embedding service configured: {modal_client.modal_url}")
-    else:
-        logger.info("ℹ️  Modal embedding service not configured, will use local embeddings")
-    
-    # Start background task
-    asyncio.create_task(_poll_pending_calls())
-
-
-@app.on_event("shutdown")
-async def shutdown_event() -> None:
-    """Clean up resources on shutdown."""
-    logger.info("Shutting down...")
-    
-    # Close database
-    close_db()
-    
-    # Close Redis
-    close_redis()
-    logger.info("✅ Redis connection closed")
-    
-    # Close Modal
-    await close_modal_client()
-    logger.info("✅ Modal client closed")
 
