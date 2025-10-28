@@ -58,3 +58,4 @@ logs/
 # Temporary files
 *.tmp
 *.temp
+backend/email_agent/tokens/gmail_tokens.json
