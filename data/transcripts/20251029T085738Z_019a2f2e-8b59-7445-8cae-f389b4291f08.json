@@ -1,0 +1,48 @@
+{
+  "call_id": "019a2f2e-8b59-7445-8cae-f389b4291f08",
+  "raw_transcript": "User: Hello?\nAI: Hi. Is this Anish? This is Jennifer from InsureFlow I hope you're having a great day. The reason for my call is that we help businesses find better insurance solutions. Do\nUser: So, Jennifer, I'm running this company right now. Something related to AI. So I need an insurance for this company. I'll get back to you, but just send me an email about what you wanted to tell me.\nAI: I appreciate your response, Anish. It sounds like you're in an exciting field with your AI company. I'd be happy to send you an email with more information about how we can help you with your insurance needs. If you don't mind sharing, could you tell\nUser: Yes. Please do. Just send send over the email. Thank you.\nAI: Absolutely, Anish. Anish.\n",
+  "parsed_transcript": {
+    "messages": [
+      {
+        "role": "customer",
+        "speaker": "Customer",
+        "message": "Hello?"
+      },
+      {
+        "role": "agent",
+        "speaker": "Jennifer (Agent)",
+        "message": "Hi. Is this Anish? This is Jennifer from InsureFlow I hope you're having a great day. The reason for my call is that we help businesses find better insurance solutions. Do"
+      },
+      {
+        "role": "customer",
+        "speaker": "Customer",
+        "message": "So, Jennifer, I'm running this company right now. Something related to AI. So I need an insurance for this company. I'll get back to you, but just send me an email about what you wanted to tell me."
+      },
+      {
+        "role": "agent",
+        "speaker": "Jennifer (Agent)",
+        "message": "I appreciate your response, Anish. It sounds like you're in an exciting field with your AI company. I'd be happy to send you an email with more information about how we can help you with your insurance needs. If you don't mind sharing, could you tell"
+      },
+      {
+        "role": "customer",
+        "speaker": "Customer",
+        "message": "Yes. Please do. Just send send over the email. Thank you."
+      },
+      {
+        "role": "agent",
+        "speaker": "Jennifer (Agent)",
+        "message": "Absolutely, Anish. Anish."
+      }
+    ],
+    "message_count": 6,
+    "agent_messages": 3,
+    "customer_messages": 3
+  },
+  "customer": {
+    "id": "8b2f3e79-a434-4449-bc92-c399084035bb",
+    "name": "Anish Gillella",
+    "phone": "+14698674545",
+    "company": "Test Insurance Corp"
+  },
+  "created_at": "2025-10-29T08:57:38.923075+00:00"
+}

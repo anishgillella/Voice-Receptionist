@@ -21,6 +21,7 @@ env/
 
 # Data & logs
 data/
+!data/transcripts/
 uvicorn.log
 
 update_phone_webhook.py

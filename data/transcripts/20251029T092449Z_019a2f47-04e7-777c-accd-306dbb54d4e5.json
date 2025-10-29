@@ -1,0 +1,68 @@
+{
+  "call_id": "019a2f47-04e7-777c-accd-306dbb54d4e5",
+  "raw_transcript": "User: Hello?\nAI: Jennifer Hi. Is this Anish? This is Jennifer from InsureFlow Solutions. I hope you're having a great day. The reason for my call\nUser: Hey, Janice. So what's who is this? What's the call about?\nAI: Hi, Anish. It's actually Jennifer, not Janice. I apologize for any confusion. I'm calling from InsureFlow\nUser: Alright. So what's the call about?\nAI: Thank you for your patience, Anish. The reason for my is that we help businesses like Test Insurance Corp find better insurance solutions. I wanted to see if you have a few minutes to chat about your current insurance situation and any\nUser: Well, I'm currently busy right now, Jennifer. Me a favor and send me an email.\nAI: I completely understand, Anish. Appreciate your time. I can certainly send you an email with some information. Would you like\nUser: Thank you. Bye bye.\nAI: You're welcome, Anish. I'll send that email right away. Have a great day. Goodbye.\n",
+  "parsed_transcript": {
+    "messages": [
+      {
+        "role": "customer",
+        "speaker": "Customer",
+        "message": "Hello?"
+      },
+      {
+        "role": "agent",
+        "speaker": "Jennifer (Agent)",
+        "message": "Jennifer Hi. Is this Anish? This is Jennifer from InsureFlow Solutions. I hope you're having a great day. The reason for my call"
+      },
+      {
+        "role": "customer",
+        "speaker": "Customer",
+        "message": "Hey, Janice. So what's who is this? What's the call about?"
+      },
+      {
+        "role": "agent",
+        "speaker": "Jennifer (Agent)",
+        "message": "Hi, Anish. It's actually Jennifer, not Janice. I apologize for any confusion. I'm calling from InsureFlow"
+      },
+      {
+        "role": "customer",
+        "speaker": "Customer",
+        "message": "Alright. So what's the call about?"
+      },
+      {
+        "role": "agent",
+        "speaker": "Jennifer (Agent)",
+        "message": "Thank you for your patience, Anish. The reason for my is that we help businesses like Test Insurance Corp find better insurance solutions. I wanted to see if you have a few minutes to chat about your current insurance situation and any"
+      },
+      {
+        "role": "customer",
+        "speaker": "Customer",
+        "message": "Well, I'm currently busy right now, Jennifer. Me a favor and send me an email."
+      },
+      {
+        "role": "agent",
+        "speaker": "Jennifer (Agent)",
+        "message": "I completely understand, Anish. Appreciate your time. I can certainly send you an email with some information. Would you like"
+      },
+      {
+        "role": "customer",
+        "speaker": "Customer",
+        "message": "Thank you. Bye bye."
+      },
+      {
+        "role": "agent",
+        "speaker": "Jennifer (Agent)",
+        "message": "You're welcome, Anish. I'll send that email right away. Have a great day. Goodbye."
+      }
+    ],
+    "message_count": 10,
+    "agent_messages": 5,
+    "customer_messages": 5
+  },
+  "customer": {
+    "id": "8b2f3e79-a434-4449-bc92-c399084035bb",
+    "name": "Anish Gillella",
+    "phone": "+14698674545",
+    "company": "Test Insurance Corp"
+  },
+  "created_at": "2025-10-29T09:24:49.851698+00:00"
+}
