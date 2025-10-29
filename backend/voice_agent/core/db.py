@@ -779,3 +779,72 @@ def store_auto_response(
         logger.error(f"Failed to store auto-response for {email_id}: {e}")
         return None
 
+# ============================================================================
+# Email Embeddings Operations
+# ============================================================================
+
+def store_email_embedding(customer_id: UUID, email_id: UUID, embedding: list[float], embedding_type: str = "full") -> Dict[str, Any]:
+    """Store embedding vector for an email.
+    
+    Args:
+        customer_id: Customer UUID
+        email_id: Email record UUID
+        embedding: 1024-dimensional embedding vector
+        embedding_type: Type of embedding ('full', 'subject', etc)
+        
+    Returns:
+        Stored embedding record
+    """
+    db = get_db()
+    
+    # Convert embedding list to pgvector format
+    embedding_str = "[" + ",".join(str(x) for x in embedding) + "]"
+    
+    insert_query = f"""
+        INSERT INTO brokerage.email_embeddings 
+        (customer_id, email_id, embedding, embedding_type, created_at)
+        VALUES (%s, %s, %s::vector, %s, NOW())
+        ON CONFLICT (email_id, embedding_type) DO UPDATE
+        SET embedding = %s::vector
+        RETURNING id, email_id, embedding_type, created_at
+    """
+    
+    try:
+        result = db.insert(insert_query, (str(customer_id), str(email_id), embedding_str, embedding_type, embedding_str))
+        logger.info(f"✅ Stored email embedding for {email_id}")
+        return dict(result) if result else {}
+    except Exception as e:
+        logger.error(f"Failed to store email embedding for {email_id}: {e}")
+        return {}
+
+
+def get_email_embeddings(customer_id: UUID, limit: int = 50) -> list[Dict[str, Any]]:
+    """Get email embeddings for a customer.
+    
+    Args:
+        customer_id: Customer UUID
+        limit: Maximum number of results
+        
+    Returns:
+        List of email embeddings
+    """
+    db = get_db()
+    
+    query = f"""
+        SELECT ee.id, ee.email_id, ee.embedding, ee.embedding_type, ee.created_at,
+               ec.from_email, ec.to_email, ec.subject, ec.body
+        FROM brokerage.email_embeddings ee
+        JOIN brokerage.email_conversations ec ON ee.email_id = ec.id
+        WHERE ee.customer_id = %s
+        ORDER BY ee.created_at DESC
+        LIMIT %s
+    """
+    
+    try:
+        results = db.execute(query, (str(customer_id), limit))
+        logger.info(f"Retrieved {len(results)} email embeddings for customer {customer_id}")
+        return results
+    except Exception as e:
+        logger.error(f"Failed to get email embeddings: {e}")
+        return []
+
