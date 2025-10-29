@@ -32,6 +32,7 @@ from ..core.db import (
     store_email_analysis,
     store_auto_response,
     get_customer_conversations,
+    store_email_embedding,
 )
 from ..llm.embeddings import generate_embedding
 import httpx
@@ -125,33 +126,6 @@ async def clear_cache() -> Dict[str, str]:
     }
 
 
-@app.post("/process-calls")
-async def process_pending_calls() -> Dict[str, Any]:
-    """Process all pending calls and generate transcripts/embeddings."""
-    settings = get_settings()
-    processed = []
-    failed = []
-    
-    logger.info(f"Processing {len(_pending_calls)} pending calls")
-    
-    calls_to_process = list(_pending_calls.items())
-    for call_id, call_info in calls_to_process:
-        try:
-            await _process_call_transcript(call_id, call_info["customer_phone"], settings)
-            processed.append(call_id)
-        except Exception as e:
-            logger.error(f"Failed to process {call_id}: {e}")
-            failed.append({"call_id": call_id, "error": str(e)})
-    
-    return {
-        "status": "completed",
-        "processed": len(processed),
-        "failed": len(failed),
-        "processed_calls": processed,
-        "failed_calls": failed
-    }
-
-
 @app.post("/process-call/{call_id}")
 async def process_specific_call(call_id: str) -> Dict[str, Any]:
     """Process a specific call by call_id."""
@@ -175,65 +149,6 @@ async def process_specific_call(call_id: str) -> Dict[str, Any]:
             "call_id": call_id,
             "error": str(e)
         }
-
-
-@app.post("/fetch-recent-transcripts")
-async def fetch_recent_transcripts() -> Dict[str, Any]:
-    """Fetch transcripts from VAPI for recent calls and process them."""
-    settings = get_settings()
-    processed = []
-    failed = []
-    
-    logger.info("Fetching recent calls from VAPI")
-    
-    try:
-        # Get recent calls from VAPI
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            headers = {"Authorization": f"Bearer {settings.vapi_api_key}"}
-            response = await client.get(f"{_vapi_base_url}/call?limit=10", headers=headers)
-            response.raise_for_status()
-        
-        calls = response.json() if isinstance(response.json(), list) else response.json().get("calls", [])
-        logger.info(f"Found {len(calls)} recent calls from VAPI")
-        
-        # Get customer phone for context
-        db = get_db()
-        customer = db.execute(
-            f"SELECT phone_number FROM brokerage.customers LIMIT 1",
-            ()
-        )
-        customer_phone = customer[0]['phone_number'] if customer else settings.customer_phone_number
-        
-        for call in calls[:5]:  # Process last 5 calls
-            if isinstance(call, dict):
-                call_id = call.get("id")
-                
-                # Skip if already processed
-                existing = db.execute(
-                    f"SELECT id FROM brokerage.conversations WHERE call_id = %s",
-                    (call_id,)
-                )
-                
-                if not existing:
-                    try:
-                        logger.info(f"Processing call from VAPI: {call_id}")
-                        await _process_call_transcript(call_id, customer_phone, settings)
-                        processed.append(call_id)
-                    except Exception as e:
-                        logger.error(f"Failed to process {call_id}: {e}")
-                        failed.append({"call_id": call_id, "error": str(e)})
-    
-    except Exception as e:
-        logger.error(f"Error fetching calls from VAPI: {e}")
-        failed.append({"error": str(e)})
-    
-    return {
-        "status": "completed",
-        "processed": len(processed),
-        "failed": len(failed),
-        "processed_calls": processed,
-        "failed_calls": failed
-    }
 
 
 @app.post("/call")
@@ -506,6 +421,7 @@ async def sendgrid_inbound_webhook(request: Request) -> JSONResponse:
     SendGrid will POST email content here when customer replies.
     """
     try:
+        settings = get_settings()
         # Parse form data from SendGrid
         form_data = await request.form()
         
@@ -520,10 +436,10 @@ async def sendgrid_inbound_webhook(request: Request) -> JSONResponse:
         
         logger.info(f"📧 Received email webhook: {subject} from {from_email}")
         
-        # Find customer by email
-        customer = get_customer_by_email(to_email)  # We need to add this function
+        # Find customer by email - look up FROM email (customer sending reply)
+        customer = get_customer_by_email(from_email)
         if not customer:
-            logger.warning(f"Customer not found for email {to_email}")
+            logger.warning(f"Customer not found for email {from_email}")
             return JSONResponse({"status": "ok"}, status_code=200)
         
         customer_id = customer.get("id")
@@ -543,6 +459,19 @@ async def sendgrid_inbound_webhook(request: Request) -> JSONResponse:
             return JSONResponse({"status": "failed"}, status_code=500)
         
         email_id = email_record.get("id")
+        
+        # Generate and store email embedding
+        try:
+            embedding = generate_embedding(email_body)
+            store_email_embedding(
+                customer_id=customer_id,
+                email_id=email_id,
+                embedding=embedding,
+                embedding_type="full"
+            )
+            logger.info(f"✅ Generated email embedding")
+        except Exception as e:
+            logger.warning(f"Failed to generate email embedding: {e}")
         
         # Get full customer context
         customer_name = f"{customer.get('first_name', '')} {customer.get('last_name', '')}".strip()
@@ -998,4 +927,145 @@ async def _poll_pending_calls() -> None:
         except Exception as e:
             logger.error(f"Error in polling task: {e}")
             await asyncio.sleep(10)  # Back off on error
+
+# ============================================================================
+# VECTOR SEARCH & ON-DEMAND CONTEXT RETRIEVAL
+# ============================================================================
+
+@app.post("/customer/search-context")
+async def search_customer_context(
+    customer_id: str,
+    query: str,
+    top_k: int = 3
+) -> Dict[str, Any]:
+    """Search customer's past conversations using semantic similarity.
+    
+    This endpoint allows the AI agent to retrieve relevant customer information
+    on-demand based on what the customer is asking about, without loading
+    everything into the system prompt upfront.
+    
+    Args:
+        customer_id: Customer UUID
+        query: Search query (what the customer is asking about)
+        top_k: Number of results to return (default: 3)
+        
+    Returns:
+        List of relevant conversations with similarity scores
+    """
+    try:
+        from uuid import UUID
+        from ..services.context_manager import SemanticVectorSearch
+        
+        search = SemanticVectorSearch()
+        results = search.search_customer_context(
+            customer_id=UUID(customer_id),
+            query=query,
+            top_k=top_k
+        )
+        
+        return {
+            "status": "success",
+            "query": query,
+            "results_count": len(results),
+            "results": results
+        }
+    except Exception as e:
+        logger.error(f"Error searching customer context: {e}")
+        return {
+            "status": "error",
+            "error": str(e),
+            "results": []
+        }
+
+
+@app.post("/customer/search-emails")
+async def search_customer_emails(
+    customer_id: str,
+    query: str,
+    top_k: int = 5
+) -> Dict[str, Any]:
+    """Search customer's email history.
+    
+    Args:
+        customer_id: Customer UUID
+        query: Search query (keywords, topics, etc)
+        top_k: Number of results to return (default: 5)
+        
+    Returns:
+        List of relevant emails
+    """
+    try:
+        from uuid import UUID
+        from ..services.context_manager import SemanticVectorSearch
+        
+        search = SemanticVectorSearch()
+        results = search.search_customer_emails(
+            customer_id=UUID(customer_id),
+            query=query,
+            top_k=top_k
+        )
+        
+        return {
+            "status": "success",
+            "query": query,
+            "results_count": len(results),
+            "results": results
+        }
+    except Exception as e:
+        logger.error(f"Error searching customer emails: {e}")
+        return {
+            "status": "error",
+            "error": str(e),
+            "results": []
+        }
+
+
+@app.get("/customer/{customer_id}/profile")
+async def get_customer_profile(customer_id: str) -> Dict[str, Any]:
+    """Get customer profile with stored information.
+    
+    Args:
+        customer_id: Customer UUID
+        
+    Returns:
+        Customer profile data
+    """
+    try:
+        from uuid import UUID
+        
+        db = get_db()
+        customer = db.execute_one(
+            "SELECT * FROM brokerage.customers WHERE id = %s",
+            (customer_id,)
+        )
+        
+        if not customer:
+            return {"status": "not_found", "error": "Customer not found"}
+        
+        # Get call statistics
+        call_count = db.execute_one(
+            "SELECT COUNT(*) as count FROM brokerage.conversations WHERE customer_id = %s",
+            (customer_id,)
+        )
+        
+        # Get email count
+        email_count = db.execute_one(
+            "SELECT COUNT(*) as count FROM brokerage.email_conversations WHERE customer_id = %s",
+            (customer_id,)
+        )
+        
+        return {
+            "status": "success",
+            "customer": dict(customer),
+            "stats": {
+                "total_calls": call_count['count'] if call_count else 0,
+                "total_emails": email_count['count'] if email_count else 0
+            }
+        }
+    except Exception as e:
+        logger.error(f"Error retrieving customer profile: {e}")
+        return {
+            "status": "error",
+            "error": str(e)
+        }
 
